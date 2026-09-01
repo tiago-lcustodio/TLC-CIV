@@ -53,7 +53,7 @@ class MenuConfiguracao:
         while True:
             largura, altura = self.tela.get_size()
             self.tela.fill((34,38,45))
-            titulo = self.fonte_titulo.render('TLC CIV 0.10', True, (240,240,240))
+            titulo = self.fonte_titulo.render('TLC CIV 0.12', True, (240,240,240))
             self.tela.blit(titulo, titulo.get_rect(center=(largura//2,42)))
             painel = pygame.Rect(max(20,largura//2-370),78,min(740,largura-40),max(560,altura-120))
             pygame.draw.rect(self.tela,(46,51,59),painel,border_radius=10)

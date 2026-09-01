@@ -10,7 +10,8 @@ from ai import ControladorIA
 from timeline import CalendarioJogo
 from data import (
     CORES_JOGADOR, CIVILIZACOES, UNIDADES, CONSTRUCOES,
-    RENDIMENTOS_BASE_CIDADE, REGRAS_ENTORNO_CIDADE, ICONES_RECURSOS, ICONES_TERRENO, MELHORIAS,
+    RENDIMENTOS_BASE_CIDADE, REGRAS_ENTORNO_CIDADE, ICONES_RECURSOS, ICONES_TERRENO, MELHORIAS, INFRAESTRUTURA,
+    TECNOLOGIAS, POLITICAS,
 )
 
 TAMANHO_TILE = 34
@@ -42,6 +43,10 @@ class Jogo:
         self.fonte_icone = pygame.font.SysFont('dejavusans', 20)
         self.fonte_icone_grande = pygame.font.SysFont('dejavusans', 23, bold=True)
         self.fonte_indicador = pygame.font.SysFont('dejavusans', 14, bold=True)
+        # Fonte dedicada a símbolos; DejaVu Sans costuma cobrir os caracteres usados pelo jogo.
+        caminho_simbolos = pygame.font.match_font('dejavusans') or pygame.font.match_font('arial')
+        self.fonte_simbolos = pygame.font.Font(caminho_simbolos, 13) if caminho_simbolos else self.fonte_pequena
+        self.fonte_status_recursos = pygame.font.Font(caminho_simbolos, 11) if caminho_simbolos else self.fonte_mini
 
         self.mundo = Mundo(configuracao['largura_mapa'], configuracao['altura_mapa'], configuracao['percentuais'])
         self.turno = 1
@@ -58,13 +63,14 @@ class Jogo:
         self.modal = None
         self.menu_aberto = None
         self.campo_nome = ''
-        self.mensagem = 'Selecione uma unidade e clique em um destino.'
+        self.mensagem = 'Dica: valor = estoque; (+X/t) = ganho por turno; Produção aparece como +X/t. Duplo clique em Status Geral.'
         self.notificacoes = []
         self.notificacao_atual = None
         self.ajuda_contexto = None
         self.ultimo_clique_esquerdo_ms = -1000
         self.ultimo_clique_esquerdo_tile = None
         self.limite_duplo_clique_ms = 350
+        self.ultimo_clique_status_ms = -1000
 
         self._criar_jogadores()
         self.jogador_humano = self.jogadores[0]
@@ -142,6 +148,8 @@ class Jogo:
         jogador = self.jogador_por_id(cidade.dono_id)
         if jogador and cidade not in jogador.cidades:
             jogador.cidades.append(cidade)
+            if len(jogador.cidades) == 1:
+                cidade.capital = True
         self._inicializar_territorio_cidade(cidade)
 
     def _tile_controlado_por_outra_cidade(self, x, y, cidade_atual=None):
@@ -186,6 +194,7 @@ class Jogo:
         self.rect_novo = pygame.Rect(10, ALTURA_BARRA_MENU, 135, 30)
         self.rect_sair = pygame.Rect(10, ALTURA_BARRA_MENU + 30, 135, 30)
         self.rect_sobre = pygame.Rect(88, ALTURA_BARRA_MENU, 135, 30)
+        self.rect_status_geral = pygame.Rect(232, ALTURA_BARRA_MENU + 3, 94, 24)
 
         y = ALTURA_BARRA_MENU + ALTURA_BARRA_STATUS + 5
         x = 8
@@ -198,8 +207,9 @@ class Jogo:
         self.rect_militar = pygame.Rect(x, y, 68, 32); x += 76
         self.x_acoes = x
         self.rect_fundar = pygame.Rect(x, y, 116, 32)
-        self.rect_fazenda = pygame.Rect(x, y, 92, 32)
-        self.rect_pasto = pygame.Rect(x + 98, y, 82, 32)
+        self.rect_fazenda = pygame.Rect(x, y, 88, 32)
+        self.rect_pasto = pygame.Rect(x + 94, y, 76, 32)
+        self.rect_estrada = pygame.Rect(x + 176, y, 86, 32)
         self.limitar_camera()
 
     def centralizar_camera(self, x, y):
@@ -276,6 +286,40 @@ class Jogo:
             carga = f' | Carga {len(unidade.carga)}/{unidade.capacidade_transporte}' if unidade.capacidade_transporte else ''
             self.mensagem = f'{unidade.icone} {unidade.tipo} selecionado.{carga}'
 
+    # ---------- capital / estradas ----------
+    def capital_jogador(self, jogador):
+        for cidade in jogador.cidades:
+            if getattr(cidade, 'capital', False):
+                return cidade
+        return jogador.cidades[0] if jogador.cidades else None
+
+    def _tiles_estrada_que_tocam_cidade(self, cidade):
+        return {tile for tile in self.territorio_cidade(cidade) if self.mundo.tem_estrada(*tile)}
+
+    def cidade_conectada_capital(self, cidade):
+        jogador = self.jogador_por_id(cidade.dono_id)
+        if not jogador:
+            return False
+        capital = self.capital_jogador(jogador)
+        if not capital or cidade is capital:
+            return False
+        origem = self._tiles_estrada_que_tocam_cidade(cidade)
+        alvo = self._tiles_estrada_que_tocam_cidade(capital)
+        if not origem or not alvo:
+            return False
+        fila = list(origem); vistos = set(origem)
+        while fila:
+            atual = fila.pop(0)
+            if atual in alvo:
+                return True
+            x, y = atual
+            for dx, dy in VIZINHOS_8:
+                prox = (x + dx, y + dy)
+                if prox in vistos or not self.mundo.dentro(*prox) or not self.mundo.tem_estrada(*prox):
+                    continue
+                vistos.add(prox); fila.append(prox)
+        return False
+
     # ---------- economia / modificadores ----------
     def modificadores_entorno_cidade(self, cidade):
         contagem = {}
@@ -310,6 +354,10 @@ class Jogo:
             valores[recurso] = valores.get(recurso, 0) + q
         detalhes.append((f'Tile central: {self.mundo.terreno(cidade.x, cidade.y)}', central))
 
+        if self.mundo.tile_adjacente_rio(cidade.x, cidade.y):
+            valores['alimento'] += 1
+            detalhes.append(('Cidade ribeirinha', {'alimento': 1}))
+
         for tipo, x, y in cidade.melhorias:
             if (x, y) not in self.territorio_cidade(cidade):
                 continue
@@ -322,6 +370,11 @@ class Jogo:
                 ativada = tipo in variante.get('melhorias_ativadoras', [])
                 rotulo += f' | {variante["nome"]}: ' + ('ATIVO' if ativada else 'não explorado')
             detalhes.append((rotulo, bonus))
+
+        if self.cidade_conectada_capital(cidade):
+            valores['ouro'] += 1
+            valores['lealdade'] += 1
+            detalhes.append(('Estrada até a Capital', {'ouro': 1, 'lealdade': 1}))
 
         mods = self.modificadores_cidade(cidade)
         finais = {
@@ -338,17 +391,78 @@ class Jogo:
     def rendimentos_cidade(self, cidade):
         return self.detalhamento_rendimentos_cidade(cidade)[0]
 
+    def taxas_civilizacao(self, jogador):
+        taxas = {k: 0 for k in ('alimento','producao','ouro','ciencia','fe','lealdade','felicidade')}
+        for cidade in jogador.cidades:
+            r = self.rendimentos_cidade(cidade)
+            for chave in taxas:
+                taxas[chave] += r.get(chave, 0)
+        return taxas
+
     def totais_civilizacao(self, jogador):
-        # Produção é exibida como capacidade atual por turno; os demais são estoques.
+        # Estoques acumulados. Produção não é tratada como estoque útil para a fila:
+        # sua capacidade corrente é mostrada separadamente por taxas_civilizacao().
         return {
             'alimento': sum(c.alimento for c in jogador.cidades),
-            'producao': sum(self.rendimentos_cidade(c)['producao'] for c in jogador.cidades),
+            'producao': sum(c.producao for c in jogador.cidades),
             'ouro': sum(c.ouro for c in jogador.cidades),
             'ciencia': sum(c.ciencia for c in jogador.cidades),
             'fe': sum(c.fe for c in jogador.cidades),
             'lealdade': sum(c.lealdade for c in jogador.cidades),
             'felicidade': sum(c.felicidade for c in jogador.cidades),
         }
+
+    def _texto_valores_bonus(self, valores):
+        nomes = {'alimento':'Alimento','producao':'Produção','ouro':'Ouro','ciencia':'Ciência','fe':'Fé','lealdade':'Lealdade','felicidade':'Felicidade'}
+        partes = []
+        for chave in ('alimento','producao','ouro','ciencia','fe','lealdade','felicidade'):
+            v = valores.get(chave, 0)
+            if v:
+                partes.append(f'{nomes[chave]} {v:+g}/t')
+        return ', '.join(partes) if partes else 'sem alteração numérica direta'
+
+    def _descricao_modificador(self, mod):
+        mapa = {
+            'alimento_por_turno':'Alimento', 'producao_por_turno':'Produção',
+            'ouro_por_turno':'Ouro', 'ciencia_por_turno':'Ciência',
+            'fe_por_turno':'Fé', 'lealdade_por_turno':'Lealdade',
+            'felicidade_por_turno':'Felicidade'
+        }
+        nome = mapa.get(mod.get('atributo'), mod.get('atributo','Bônus'))
+        op = mod.get('operacao','somar'); valor = mod.get('valor',0)
+        if op == 'percentual': return f'{nome} {valor:+g}%'
+        if op == 'multiplicar': return f'{nome} ×{valor:g}'
+        if op == 'subtrair': valor = -abs(valor)
+        return f'{nome} {valor:+g}/t'
+
+    def linhas_bonus_status(self, jogador):
+        linhas = []
+        civ = CIVILIZACOES.get(jogador.civilizacao, {})
+        mods_civ = civ.get('modificadores', [])
+        if mods_civ:
+            linhas.append(f'Civilização {jogador.civilizacao}: ' + ', '.join(self._descricao_modificador(m) for m in mods_civ))
+        else:
+            linhas.append(f'Civilização {jogador.civilizacao}: sem bônus exclusivo cadastrado ainda.')
+        for tec in sorted(jogador.tecnologias):
+            mods = TECNOLOGIAS.get(tec, {}).get('modificadores', [])
+            if mods: linhas.append(f'Tecnologia {tec}: ' + ', '.join(self._descricao_modificador(m) for m in mods))
+        for pol in sorted(jogador.politicas):
+            mods = POLITICAS.get(pol, {}).get('modificadores', [])
+            if mods: linhas.append(f'Política {pol}: ' + ', '.join(self._descricao_modificador(m) for m in mods))
+        for cidade in jogador.cidades:
+            for construcao in cidade.construcoes:
+                mods = CONSTRUCOES.get(construcao, {}).get('modificadores', [])
+                if mods: linhas.append(f'{cidade.nome} — {construcao}: ' + ', '.join(self._descricao_modificador(m) for m in mods))
+            _, efeitos = self.modificadores_entorno_cidade(cidade)
+            for efeito in efeitos:
+                linhas.append(f'{cidade.nome} — entorno: {efeito}.')
+            _, detalhes = self.detalhamento_rendimentos_cidade(cidade)
+            for rotulo, valores in detalhes:
+                if rotulo.startswith('Base da cidade') or rotulo.startswith('Tile central'):
+                    continue
+                if any(valores.get(k,0) for k in valores):
+                    linhas.append(f'{cidade.nome} — {rotulo}: {self._texto_valores_bonus(valores)}')
+        return linhas
 
     # ---------- movimento / transporte ----------
     def pode_fundar(self):
@@ -359,13 +473,22 @@ class Jogo:
         u = self.unidade_selecionada
         return bool(u and u.dono_id == 0 and not u.esta_embarcada and u.tipo == 'Trabalhador' and u.movimento > 0 and self.cidade_dona_tile(u.x,u.y,0) and self.mundo.passavel(u.x,u.y) and self.mundo.melhoria_em(u.x,u.y) is None)
 
+    def trabalhador_pode_construir_estrada(self):
+        u = self.unidade_selecionada
+        if not (u and u.dono_id == 0 and not u.esta_embarcada and u.tipo == 'Trabalhador' and u.movimento > 0):
+            return False
+        if not self.mundo.passavel(u.x, u.y) or self.mundo.tem_estrada(u.x, u.y):
+            return False
+        dona = self.cidade_dona_tile(u.x, u.y)
+        return dona is None or dona.dono_id == self.jogador_humano.id
+
     def ordenar_movimento_unidade(self, unidade, destino):
         if unidade.movimento <= 0 or unidade.esta_embarcada:
             unidade.cancelar_rota(); return False
         rota = self.mundo.caminho((unidade.x, unidade.y), destino, unidade.dominio)
         if not rota and destino != (unidade.x, unidade.y): return False
         unidade.definir_rota(rota)
-        unidade.mover_ate_esgotar()
+        unidade.mover_ate_esgotar(lambda origem, destino: self.mundo.custo_movimento(origem, destino, unidade.dominio))
         unidade.cancelar_rota()
         return True
 
@@ -382,7 +505,8 @@ class Jogo:
 
         if self.ordenar_movimento_unidade(u, destino):
             self.atualizar_visibilidade_jogador(self.jogador_humano)
-            self.mensagem = f'{u.tipo} moveu-se. Movimento: {u.movimento}/{u.movimento_max}.'
+            mov = f'{u.movimento:.1f}'.rstrip('0').rstrip('.')
+            self.mensagem = f'{u.tipo} moveu-se. Movimento: {mov}/{u.movimento_max}.'
         else:
             if u.tipo == 'Galé' and terreno_destino == 'Água Profunda':
                 self.mensagem = 'Galé só pode navegar em Água Rasa.'
@@ -492,8 +616,24 @@ class Jogo:
         c=self.cidade_dona_tile(u.x,u.y,0)
         if self.mundo.construir_melhoria(u.x,u.y,tipo):
             c.melhorias.append((tipo,u.x,u.y)); u.movimento=0
-            if u.registrar_melhoria(): self._remover_unidade(u); self.mensagem=f'{tipo} construída. Trabalhador consumido após 3 melhorias.'
-            else: self.mensagem=f'{tipo} construída. Restam {u.melhorias_restantes} melhorias.'
+            if u.registrar_melhoria(): self._remover_unidade(u); self.mensagem=f'{tipo} construída. Trabalhador consumido após 3 obras.'
+            else: self.mensagem=f'{tipo} construída. Restam {u.melhorias_restantes} obras.'
+
+    def construir_estrada(self):
+        u = self.unidade_selecionada
+        if not self.trabalhador_pode_construir_estrada():
+            self.mensagem = 'O Trabalhador não pode construir uma estrada neste quadrado.'
+            return
+        if self.mundo.construir_estrada(u.x, u.y):
+            u.movimento = 0
+            ponte = self.mundo.tile_adjacente_rio(u.x, u.y)
+            desaparece = u.registrar_melhoria()
+            complemento = ' Travessias de rio usam ponte automática.' if ponte else ''
+            if desaparece:
+                self._remover_unidade(u)
+                self.mensagem = 'Estrada construída.' + complemento + ' O Trabalhador concluiu sua 3ª obra e foi consumido.'
+            else:
+                self.mensagem = f'Estrada construída.{complemento} Restam {u.melhorias_restantes} obra(s) ao Trabalhador.'
 
     def _tiles_adjacentes(self,c):
         return [(c.x+dx,c.y+dy) for dx,dy in VIZINHOS_8 if self.mundo.dentro(c.x+dx,c.y+dy)]
@@ -590,21 +730,32 @@ class Jogo:
         pygame.draw.rect(self.tela,(39,43,49),(0,ALTURA_BARRA_MENU,self.largura_tela,ALTURA_BARRA_STATUS))
         if self.unidade_selecionada:
             u=self.unidade_selecionada
-            status=f'{u.icone} {u.tipo} | Mov {u.movimento}/{u.movimento_max}'
+            mov=f'{u.movimento:.1f}'.rstrip('0').rstrip('.')
+            status=f'{u.icone} {u.tipo} | Mov {mov}/{u.movimento_max}'
             if u.fortificada: status+=' | Defesa'
             if u.capacidade_transporte: status+=f' | Carga {len(u.carga)}/{u.capacidade_transporte}'
         else:
             status=f'{self.jogador_humano.civilizacao}'
+        # Mantém o status de seleção compacto para sobrar espaço aos indicadores gerais.
         self.tela.blit(self.fonte_pequena.render(status,True,(230,230,230)),(10,ALTURA_BARRA_MENU+8))
+        self.botao(self.rect_status_geral, 'Status Geral', True, (61,70,82))
 
-        tempo=f'Turno {self.turno} | {self.calendario.texto}'
-        self.tela.blit(self.fonte_pequena.render(tempo,True,(245,225,180)),(340,ALTURA_BARRA_MENU+8))
-        t=self.totais_civilizacao(self.jogador_humano)
-        recursos=(f'{ICONES_RECURSOS["alimento"]}{t["alimento"]}  {ICONES_RECURSOS["producao"]}{t["producao"]}  '
-                  f'{ICONES_RECURSOS["ouro"]}{t["ouro"]}  {ICONES_RECURSOS["ciencia"]}{t["ciencia"]}  '
-                  f'{ICONES_RECURSOS["fe"]}{t["fe"]}  {ICONES_RECURSOS["lealdade"]}{t["lealdade"]}  '
-                  f'{ICONES_RECURSOS["felicidade"]}{t["felicidade"]}')
-        surf=self.fonte_icone.render(recursos,True,(220,235,220)); self.tela.blit(surf,(self.largura_tela-surf.get_width()-12,ALTURA_BARRA_MENU+5))
+        tempo=f'T{self.turno} | {self.calendario.texto}'
+        self.tela.blit(self.fonte_pequena.render(tempo,True,(245,225,180)),(334,ALTURA_BARRA_MENU+8))
+        estoque=self.totais_civilizacao(self.jogador_humano)
+        taxa=self.taxas_civilizacao(self.jogador_humano)
+        # Regra visual: número principal = estoque; (+X) = ganho por turno. Produção é capacidade/turno.
+        recursos=(
+            f'{ICONES_RECURSOS["alimento"]}{estoque["alimento"]}(+{taxa["alimento"]})  '
+            f'{ICONES_RECURSOS["producao"]}+{taxa["producao"]}/t  '
+            f'{ICONES_RECURSOS["ouro"]}{estoque["ouro"]}(+{taxa["ouro"]})  '
+            f'{ICONES_RECURSOS["ciencia"]}{estoque["ciencia"]}(+{taxa["ciencia"]})  '
+            f'{ICONES_RECURSOS["fe"]}{estoque["fe"]}(+{taxa["fe"]})  '
+            f'{ICONES_RECURSOS["lealdade"]}{estoque["lealdade"]}(+{taxa["lealdade"]})  '
+            f'{ICONES_RECURSOS["felicidade"]}{estoque["felicidade"]}'
+        )
+        surf=self.fonte_status_recursos.render(recursos,True,(220,235,220))
+        self.tela.blit(surf,(self.largura_tela-surf.get_width()-10,ALTURA_BARRA_MENU+8))
 
         # Linha 3: ferramentas.
         pygame.draw.rect(self.tela,(48,53,60),(0,ALTURA_BARRA_MENU+ALTURA_BARRA_STATUS,self.largura_tela,ALTURA_BARRA_FERRAMENTAS))
@@ -614,6 +765,7 @@ class Jogo:
         if self.pode_fundar(): self.botao(self.rect_fundar,'Fundar Cidade',True,(128,88,48))
         elif self.unidade_selecionada and self.unidade_selecionada.tipo=='Trabalhador':
             ativo=self.trabalhador_pode_melhorar(); self.botao(self.rect_fazenda,'Fazenda +1',ativo); self.botao(self.rect_pasto,'Pasto +1',ativo)
+            self.botao(self.rect_estrada,'Estrada',self.trabalhador_pode_construir_estrada())
 
         if self.menu_aberto=='Jogo':
             pygame.draw.rect(self.tela,(49,53,60),(10,ALTURA_BARRA_MENU,135,60)); self._item_menu(self.rect_novo,'Novo'); self._item_menu(self.rect_sair,'Sair')
@@ -624,6 +776,75 @@ class Jogo:
         self.tela.blit(self.fonte_pequena.render(t,True,(235,235,235)),(r.x+10,r.y+7))
 
     # ---------- desenho do mapa ----------
+    # ---------- desenho de rios / estradas ----------
+    def desenhar_infraestrutura(self):
+        j = self.jogador_humano
+        cor_rio = (55, 190, 250)
+        cor_rio_borda = (20, 75, 130)
+        cor_estrada = (145, 112, 72)
+        cor_ponte = (70, 55, 40)
+
+        # Rios ficam nas bordas compartilhadas entre tiles. Para garantir contraste,
+        # cada segmento tem uma borda azul-escura larga e um núcleo azul-claro.
+        def linha_rio(p1, p2, visivel):
+            if visivel:
+                borda, nucleo = cor_rio_borda, cor_rio
+            else:
+                borda = tuple(max(8, int(v*.40)) for v in cor_rio_borda)
+                nucleo = tuple(max(12, int(v*.42)) for v in cor_rio)
+            pygame.draw.line(self.tela, borda, p1, p2, 7)
+            pygame.draw.line(self.tela, nucleo, p1, p2, 4)
+
+        for a, b in self.mundo.rios:
+            if a not in j.explorado and b not in j.explorado:
+                continue
+            ax, ay = a; bx, by = b
+            asx, asy = self.tile_para_tela(ax, ay)
+            vis = a in j.visivel or b in j.visivel
+            if bx == ax + 1 and by == ay:
+                x = asx + TAMANHO_TILE
+                linha_rio((x, asy+1), (x, asy+TAMANHO_TILE-1), vis)
+            elif bx == ax - 1 and by == ay:
+                x = asx
+                linha_rio((x, asy+1), (x, asy+TAMANHO_TILE-1), vis)
+            elif by == ay + 1 and bx == ax:
+                y = asy + TAMANHO_TILE
+                linha_rio((asx+1, y), (asx+TAMANHO_TILE-1, y), vis)
+            elif by == ay - 1 and bx == ax:
+                y = asy
+                linha_rio((asx+1, y), (asx+TAMANHO_TILE-1, y), vis)
+
+        # Estradas são linhas dentro dos tiles e ligam centros de tiles adjacentes.
+        desenhadas = set()
+        for x, y in self.mundo.estradas:
+            if (x, y) not in j.explorado:
+                continue
+            sx, sy = self.tile_para_tela(x, y)
+            centro = (sx + TAMANHO_TILE // 2, sy + TAMANHO_TILE // 2)
+            for dx, dy in VIZINHOS_8:
+                viz = (x + dx, y + dy)
+                if viz not in self.mundo.estradas or not self.mundo.dentro(*viz):
+                    continue
+                aresta = tuple(sorted(((x, y), viz)))
+                if aresta in desenhadas:
+                    continue
+                desenhadas.add(aresta)
+                vsx, vsy = self.tile_para_tela(*viz)
+                destino = (vsx + TAMANHO_TILE // 2, vsy + TAMANHO_TILE // 2)
+                vis = (x, y) in j.visivel or viz in j.visivel
+                cor = cor_estrada if vis else tuple(int(v * .45) for v in cor_estrada)
+                pygame.draw.line(self.tela, cor, centro, destino, 3)
+                # Se a estrada cruza a borda de um rio, desenha uma pequena ponte.
+                if self.mundo.tem_rio_entre((x, y), viz):
+                    mx = (centro[0] + destino[0]) // 2
+                    my = (centro[1] + destino[1]) // 2
+                    if dx != 0 and dy == 0:
+                        pygame.draw.line(self.tela, cor_ponte, (mx-3, my-5), (mx-3, my+5), 2)
+                        pygame.draw.line(self.tela, cor_ponte, (mx+3, my-5), (mx+3, my+5), 2)
+                    elif dy != 0 and dx == 0:
+                        pygame.draw.line(self.tela, cor_ponte, (mx-5, my-3), (mx+5, my-3), 2)
+                        pygame.draw.line(self.tela, cor_ponte, (mx-5, my+3), (mx+5, my+3), 2)
+
     def desenhar_mapa(self):
         j=self.jogador_humano
         self.tela.set_clip(self.viewport); pygame.draw.rect(self.tela,(4,4,6),self.viewport)
@@ -656,6 +877,7 @@ class Jogo:
                     if mel:
                         mi=MELHORIAS.get(mel,{}).get('icone','•')
                         ms=self.fonte_icone.render(mi,True,(35,25,15)); self.tela.blit(ms,(sx+2,sy+TAMANHO_TILE-ms.get_height()+2))
+        self.desenhar_infraestrutura()
         self.desenhar_cidades(); self.desenhar_unidades(); self.tela.set_clip(None)
 
     def desenhar_cidades(self):
@@ -664,7 +886,7 @@ class Jogo:
             if (c.x,c.y) not in vis: continue
             dono=self.jogador_por_id(c.dono_id); sx,sy=self.tile_para_tela(c.x,c.y)
             pygame.draw.rect(self.tela,dono.cor,(sx+5,sy+5,TAMANHO_TILE-10,TAMANHO_TILE-10),border_radius=4)
-            txt=self.fonte_icone_grande.render('♜',True,(255,255,255)); self.tela.blit(txt,txt.get_rect(center=(sx+17,sy+17)))
+            txt=self.fonte_icone_grande.render('◈',True,(255,255,255)); self.tela.blit(txt,txt.get_rect(center=(sx+17,sy+17)))
             nome=self.fonte_pequena.render(f'{c.nome} ({c.populacao})',True,(255,255,255)); fundo=pygame.Rect(sx-2,sy-18,nome.get_width()+8,18); pygame.draw.rect(self.tela,dono.cor,fundo,border_radius=3); self.tela.blit(nome,(fundo.x+4,fundo.y+1))
 
     def desenhar_unidades(self):
@@ -706,7 +928,8 @@ class Jogo:
         c=self.cidade_modal; largura=min(900,self.largura_tela-40); altura=min(590,self.altura_tela-40)
         caixa=pygame.Rect((self.largura_tela-largura)//2,(self.altura_tela-altura)//2,largura,altura); pygame.draw.rect(self.tela,(48,52,59),caixa,border_radius=10)
         self.rect_fechar_cidade=pygame.Rect(caixa.right-45,caixa.y+15,30,30); self.botao(self.rect_fechar_cidade,'X')
-        self.tela.blit(self.fonte_grande.render(f'♜ {c.nome} — {self.jogador_humano.civilizacao}',True,(245,235,190)),(caixa.x+25,caixa.y+18))
+        titulo_cidade = f'◈ {c.nome}' + (' — Capital' if c.capital else '') + f' — {self.jogador_humano.civilizacao}'
+        self.tela.blit(self.fonte_grande.render(titulo_cidade,True,(245,235,190)),(caixa.x+25,caixa.y+18))
         r, detalhes=self.detalhamento_rendimentos_cidade(c)
         limite=c.limite_proxima_populacao()
         prox_leal=c.proximo_limite_lealdade()
@@ -763,13 +986,15 @@ class Jogo:
         self.tela.blit(self.fonte_negrito.render('O que gera bônus nesta cidade',True,(240,240,240)),(dx,yy2)); yy2+=25
         for rotulo, valores in detalhes:
             partes=[]
+            nomes_rec={'alimento':'Alimento','producao':'Produção','ouro':'Ouro','ciencia':'Ciência','fe':'Fé','lealdade':'Lealdade'}
             for rec in ('alimento','producao','ouro','ciencia','fe','lealdade'):
                 v=valores.get(rec,0)
                 if v:
-                    partes.append(f'{ICONES_RECURSOS[rec]}{v:+d}')
-            linha=f'• {rotulo}' + (f'  [{" ".join(partes)}]' if partes else '')
+                    # Mostra símbolo + nome: se o glifo falhar em algum sistema, o nome continua legível.
+                    partes.append(f'{ICONES_RECURSOS.get(rec,"")} {nomes_rec[rec]} {v:+d}')
+            linha=f'• {rotulo}' + (f'  [{"  ".join(partes)}]' if partes else '')
             cor=(215,225,210) if 'ATIVO' in rotulo or 'Base' in rotulo or 'central' in rotulo else (180,180,180)
-            self.tela.blit(self.fonte_pequena.render(linha,True,cor),(dx,yy2)); yy2+=18
+            self.tela.blit(self.fonte_simbolos.render(linha,True,cor),(dx,yy2)); yy2+=18
             if yy2 > caixa.bottom-85: break
         yy2+=5
         self.tela.blit(self.fonte_negrito.render('Recursos ainda não explorados',True,(240,240,240)),(dx,yy2)); yy2+=23
@@ -829,7 +1054,7 @@ class Jogo:
                 f'Posição: ({u.x}, {u.y})',
             ]
             if u.tipo == 'Trabalhador':
-                linhas.append(f'Melhorias restantes: {u.melhorias_restantes}')
+                linhas.append(f'Obras restantes: {u.melhorias_restantes}')
             if u.capacidade_transporte:
                 linhas.append(f'Capacidade de transporte: {len(u.carga)}/{u.capacidade_transporte}')
                 if u.carga:
@@ -854,6 +1079,11 @@ class Jogo:
         base = self.mundo.rendimentos_base_tile(x, y)
         partes = [f'{ICONES_RECURSOS[k]} {k}: {v:+d}' for k, v in base.items() if v]
         linhas = [f'Rendimento natural do tile: {" | ".join(partes) if partes else "nenhum"}']
+        if self.mundo.tile_adjacente_rio(x, y):
+            linhas.append('Rio: este tile é adjacente a um rio.')
+        if self.mundo.tem_estrada(x, y):
+            linhas.append('Estrada: ativa — movimento terrestre custa 50% neste tile.')
+            linhas.append('Estradas contínuas até a Capital dão +1 Ouro e +1 Lealdade/turno à cidade conectada.')
 
         if variante:
             ativadores = ', '.join(variante.get('melhorias_ativadoras', [])) or 'nenhuma melhoria'
@@ -884,6 +1114,77 @@ class Jogo:
         for linha in linhas:
             self.tela.blit(self.fonte.render(linha, True, (225,225,225)), (caixa.x+28, yy))
             yy += 27
+
+    def desenhar_modal_status_geral(self):
+        j = self.jogador_humano
+        largura = min(980, self.largura_tela - 40)
+        altura = min(620, self.altura_tela - 40)
+        caixa = pygame.Rect((self.largura_tela-largura)//2, (self.altura_tela-altura)//2, largura, altura)
+        pygame.draw.rect(self.tela, (47,51,58), caixa, border_radius=10)
+        pygame.draw.rect(self.tela, j.cor, caixa, 2, border_radius=10)
+        self.rect_fechar_status = pygame.Rect(caixa.right-45, caixa.y+15, 30, 30)
+        self.botao(self.rect_fechar_status, 'X')
+        self.tela.blit(self.fonte_grande.render('Status Geral da Civilização', True, (245,235,190)), (caixa.x+24, caixa.y+18))
+
+        estoque = self.totais_civilizacao(j)
+        taxa = self.taxas_civilizacao(j)
+        capital = self.capital_jogador(j)
+        esquerda = caixa.x + 24
+        meio = caixa.x + int(largura * .34)
+        direita = caixa.x + int(largura * .67)
+        topo = caixa.y + 62
+
+        self.tela.blit(self.fonte_negrito.render('Identidade e economia', True, (240,240,240)), (esquerda, topo))
+        linhas = [
+            f'Civilização: {j.civilizacao}', f'Era: {j.era}',
+            f'Turno/Ano: {self.turno} / {self.calendario.texto}',
+            f'Cidades: {len(j.cidades)} | Capital: {capital.nome if capital else "nenhuma"}',
+            f'Unidades: {len([u for u in j.unidades if not u.esta_embarcada])}',
+            '',
+            f'Alimento: {estoque["alimento"]} estoque | +{taxa["alimento"]}/turno',
+            f'Produção: +{taxa["producao"]}/turno (capacidade, não estoque)',
+            f'Ouro: {estoque["ouro"]} estoque | +{taxa["ouro"]}/turno',
+            f'Ciência: {estoque["ciencia"]} estoque | +{taxa["ciencia"]}/turno',
+            f'Fé: {estoque["fe"]} estoque | +{taxa["fe"]}/turno',
+            f'Lealdade: {estoque["lealdade"]} total | +{taxa["lealdade"]}/turno',
+            f'Felicidade: {estoque["felicidade"]} total',
+        ]
+        y = topo + 28
+        for linha in linhas:
+            self.tela.blit(self.fonte_pequena.render(linha, True, (220,220,220)), (esquerda, y)); y += 22
+
+        self.tela.blit(self.fonte_negrito.render('Cidades e unidades', True, (240,240,240)), (meio, topo))
+        y = topo + 28
+        if j.cidades:
+            for cidade in j.cidades[:9]:
+                r = self.rendimentos_cidade(cidade)
+                etiqueta = 'Capital' if cidade.capital else ('Conectada' if self.cidade_conectada_capital(cidade) else 'Sem ligação viária')
+                texto = (f'◈ {cidade.nome} | Pop {cidade.populacao} | {etiqueta} | '
+                         f'+A{r["alimento"]} +P{r["producao"]} +O{r["ouro"]} +C{r["ciencia"]} +F{r["fe"]} +L{r["lealdade"]}')
+                self.tela.blit(self.fonte_simbolos.render(texto, True, (218,225,218)), (meio, y)); y += 21
+        else:
+            self.tela.blit(self.fonte_pequena.render('Nenhuma cidade fundada.', True, (180,180,180)), (meio, y)); y += 22
+        y += 10
+        contagem = {}
+        for u in j.unidades:
+            contagem[u.tipo] = contagem.get(u.tipo, 0) + 1
+        for tipo in sorted(contagem):
+            dados = UNIDADES.get(tipo, {})
+            texto = f'{dados.get("icone","")} {tipo}: {contagem[tipo]}'
+            self.tela.blit(self.fonte_simbolos.render(texto, True, (220,220,220)), (meio, y)); y += 22
+
+        self.tela.blit(self.fonte_negrito.render('Bônus ativos e por quê', True, (240,240,240)), (direita, topo))
+        bonus = self.linhas_bonus_status(j)
+        y = topo + 28
+        max_linhas = max(8, int((caixa.bottom - 55 - y) / 19))
+        for linha in bonus[:max_linhas]:
+            texto = linha if len(linha) <= 53 else linha[:50] + '...'
+            self.tela.blit(self.fonte_pequena.render('• ' + texto, True, (215,220,205)), (direita, y)); y += 19
+        if len(bonus) > max_linhas:
+            self.tela.blit(self.fonte_pequena.render(f'... e mais {len(bonus)-max_linhas} bônus/causas.', True, (175,185,195)), (direita, y))
+
+        rodape = 'Barra principal: valor = estoque; (+X) = ganho/turno; Produção = capacidade atual/turno.'
+        self.tela.blit(self.fonte_pequena.render(rodape, True, (190,205,220)), (caixa.x+24, caixa.bottom-30))
 
     def desenhar_modal_generico(self,titulo,linhas):
         caixa=pygame.Rect(self.largura_tela//2-270,self.altura_tela//2-150,540,300); pygame.draw.rect(self.tela,(50,54,61),caixa,border_radius=10); self.tela.blit(self.fonte_grande.render(titulo,True,(245,235,190)),(caixa.x+25,caixa.y+25)); y=caixa.y+75
@@ -992,6 +1293,10 @@ class Jogo:
             if fechar:
                 self.modal=None; self.notificacao_atual=None; self._abrir_proxima_notificacao()
             return
+        if self.modal=='status_geral':
+            fechar=(e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE) or (e.type==pygame.MOUSEBUTTONDOWN and e.button==1 and self.rect_fechar_status.collidepoint(e.pos))
+            if fechar: self.modal=None
+            return
         if self.modal in ('sobre','politica','tecnologia','religiao','economia','diplomacia','militar'):
             if e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE: self.modal=None
             elif e.type==pygame.MOUSEBUTTONDOWN and e.button==1 and self.rect_fechar_generico.collidepoint(e.pos): self.modal=None
@@ -1013,7 +1318,13 @@ class Jogo:
                 if e.type==pygame.VIDEORESIZE: self.tela=pygame.display.set_mode(e.size,pygame.RESIZABLE); self._atualizar_layout(); continue
                 if self.modal: self.tratar_evento_modal(e); continue
                 if e.type==pygame.MOUSEWHEEL: self.offset_y-=e.y*self.velocidade_scroll; self.limitar_camera()
-                elif e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE: self.menu_aberto=None; self.selecionar_unidade(None)
+                elif e.type==pygame.KEYDOWN:
+                    if e.key==pygame.K_ESCAPE:
+                        self.menu_aberto=None; self.selecionar_unidade(None)
+                    elif e.key==pygame.K_SPACE:
+                        self.proximo_turno()
+                    elif e.key==pygame.K_b and self.pode_fundar():
+                        self.fundar_cidade()
                 elif e.type==pygame.MOUSEBUTTONDOWN:
                     pos=e.pos
                     if e.button==1 and self.rect_menu_jogo.collidepoint(pos): self.menu_aberto=None if self.menu_aberto=='Jogo' else 'Jogo'; continue
@@ -1025,6 +1336,14 @@ class Jogo:
                     if self.menu_aberto=='Ajuda' and e.button==1:
                         if self.rect_sobre.collidepoint(pos): self.modal='sobre'
                         self.menu_aberto=None; continue
+                    if e.button==1 and self.rect_status_geral.collidepoint(pos):
+                        agora=pygame.time.get_ticks()
+                        if agora-self.ultimo_clique_status_ms <= self.limite_duplo_clique_ms:
+                            self.modal='status_geral'; self.ultimo_clique_status_ms=-1000
+                        else:
+                            self.ultimo_clique_status_ms=agora
+                            self.mensagem='Status: valor = estoque; (+X) = ganho/turno; Produção = capacidade +X/turno. Duplo clique abre detalhes.'
+                        continue
                     if e.button==1 and self.rect_proximo_turno.collidepoint(pos): self.proximo_turno(); continue
                     modal_botoes=[
                         (self.rect_politica,'politica'),(self.rect_tecnologia,'tecnologia'),(self.rect_religiao,'religiao'),
@@ -1038,6 +1357,7 @@ class Jogo:
                     if e.button==1 and self.unidade_selecionada and self.unidade_selecionada.tipo=='Trabalhador':
                         if self.rect_fazenda.collidepoint(pos): self.construir_melhoria('Fazenda'); continue
                         if self.rect_pasto.collidepoint(pos): self.construir_melhoria('Pasto'); continue
+                        if self.rect_estrada.collidepoint(pos): self.construir_estrada(); continue
 
                     duplo=False
                     if e.button==1 and self.viewport.collidepoint(pos):
@@ -1060,7 +1380,8 @@ class Jogo:
             elif self.modal=='cidade': self.desenhar_modal_cidade()
             elif self.modal=='aviso': self.desenhar_modal_aviso()
             elif self.modal=='ajuda': self.desenhar_modal_ajuda()
-            elif self.modal=='sobre': self.desenhar_modal_generico('Sobre o TLC CIV 0.10',['Mouse: esquerdo seleciona, direito executa e duplo esquerdo abre detalhes.','Produção calculada em turnos pela capacidade da cidade no início da ordem.'])
+            elif self.modal=='status_geral': self.desenhar_modal_status_geral()
+            elif self.modal=='sobre': self.desenhar_modal_generico('Sobre o TLC CIV 0.12',['Cidade ◈, rios reforçados e Status Geral detalhado.','Estradas consomem uma das 3 obras do Trabalhador e reduzem movimento pela metade.'])
             elif self.modal=='politica': self.desenhar_modal_generico('Política',['Estrutura reservada para políticas e modificadores.'])
             elif self.modal=='tecnologia': self.desenhar_modal_generico('Tecnologia',[f'Era atual: {self.jogador_humano.era}',f'Tecnologias: {", ".join(sorted(self.jogador_humano.tecnologias))}',f'Ciência total: {self.totais_civilizacao(self.jogador_humano)["ciencia"]}'])
             elif self.modal=='religiao': self.desenhar_modal_generico('Religião',['Menu reservado para crenças, religiões e efeitos de Fé.'])

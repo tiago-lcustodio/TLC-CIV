@@ -188,3 +188,28 @@ ICONES_TERRENO = {
     'Água Rasa': '≈',
     'Água Profunda': '≋',
 }
+
+
+# Infraestrutura de mapa. Estradas podem coexistir com melhorias como Fazenda/Pasto.
+INFRAESTRUTURA = {
+    'Estrada': {
+        'nome': 'Estrada',
+        'icone': '═',
+        'custo_movimento': 0.5,
+        'bonus_conexao_capital': {'ouro': 1, 'lealdade': 1},
+    },
+    'Rio': {
+        'nome': 'Rio',
+        'bonus_cidade_ribeirinha': {'alimento': 1},
+        'bonus_fazenda_ribeirinha': {'alimento': 1},
+    },
+}
+
+# Geração procedural de rios. Números provisórios e fáceis de balancear.
+CONFIG_RIOS = {
+    'densidade_por_1000_tiles': 0.45,
+    'comprimento_minimo': 4,
+    'tentativas_por_rio': 12,
+    'terrenos_nascente': ['Grama'],
+    'terrenos_percurso': ['Grama', 'Deserto', 'Neve'],
+}

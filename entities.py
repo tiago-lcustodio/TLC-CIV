@@ -11,7 +11,7 @@ class Unidade:
         self.y = y
         self.dono_id = dono_id
         self.movimento_max = dados['movimento']
-        self.movimento = self.movimento_max
+        self.movimento = float(self.movimento_max)
         self.rota = []
         self.selecionada = False
         self.fortificada = False
@@ -91,25 +91,30 @@ class Unidade:
             unidade.x = self.x
             unidade.y = self.y
 
-    def mover_um_passo(self):
-        if self.movimento <= 0 or not self.rota or self.esta_embarcada:
+    def mover_um_passo(self, custo=1.0):
+        custo = float(custo)
+        if self.movimento + 1e-9 < custo or not self.rota or self.esta_embarcada:
             return False
         self.x, self.y = self.rota.pop(0)
-        self.movimento -= 1
+        self.movimento = max(0.0, self.movimento - custo)
         self._sincronizar_carga()
         return True
 
-    def mover_ate_esgotar(self):
+    def mover_ate_esgotar(self, custo_func=None):
         passos = 0
-        while self.movimento > 0 and self.rota:
-            if not self.mover_um_passo():
+        while self.movimento > 1e-9 and self.rota:
+            destino = self.rota[0]
+            custo = custo_func((self.x, self.y), destino) if custo_func else 1.0
+            if self.movimento + 1e-9 < custo:
+                break
+            if not self.mover_um_passo(custo):
                 break
             passos += 1
         return passos
 
     def novo_turno(self):
         if not self.esta_embarcada:
-            self.movimento = self.movimento_max
+            self.movimento = float(self.movimento_max)
         self.cancelar_rota()
 
     def fortificar(self):
@@ -133,7 +138,8 @@ class Unidade:
 
 
 class Cidade:
-    LIMITES_POPULACAO = [10, 20, 50, 100, 200, 500]
+    # Crescimento deliberadamente mais lento: limites dobrados em relação à v0.10.
+    LIMITES_POPULACAO = [20, 40, 100, 200, 400, 1000]
 
     def __init__(self, nome, x, y, dono_id):
         self.nome = nome
@@ -155,6 +161,7 @@ class Cidade:
         self.ouro = 0
         self.lealdade = 0
         self.felicidade = 1
+        self.capital = False
         self.melhorias = []
         self.raio_territorio = 1
         self.tiles_territorio = set()
