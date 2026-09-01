@@ -1,4 +1,6 @@
+import random
 import pygame
+from savegame import ARQUIVO_SAVE_PADRAO, existe_save
 from data import CORES_JOGADOR, CIVILIZACOES, DIFICULDADES
 
 
@@ -16,6 +18,9 @@ class MenuConfiguracao:
         self.civilizacoes = list(CIVILIZACOES); self.indice_civ = 0
         self.dificuldades = list(DIFICULDADES); self.indice_dif = 0
         self.numero_cpus = 3
+        self.densidades_rios = ['Poucos', 'Médio', 'Alto']
+        self.indice_rios = 1
+        self.seed = random.SystemRandom().randrange(1, 2_147_483_647)
 
     def ajustar_percentual(self, terreno, delta):
         atual = self.percentuais[terreno]
@@ -53,7 +58,7 @@ class MenuConfiguracao:
         while True:
             largura, altura = self.tela.get_size()
             self.tela.fill((34,38,45))
-            titulo = self.fonte_titulo.render('TLC CIV 0.12', True, (240,240,240))
+            titulo = self.fonte_titulo.render('TLC CIV 0.19', True, (240,240,240))
             self.tela.blit(titulo, titulo.get_rect(center=(largura//2,42)))
             painel = pygame.Rect(max(20,largura//2-370),78,min(740,largura-40),max(560,altura-120))
             pygame.draw.rect(self.tela,(46,51,59),painel,border_radius=10)
@@ -66,20 +71,23 @@ class MenuConfiguracao:
                 ('Adversários CPU',str(self.numero_cpus),'cpu'),
                 ('Dificuldade',self.dificuldades[self.indice_dif],'dif'),
                 ('Tamanho do mapa',f'{self.tamanhos[self.indice_tamanho]} x {self.tamanhos[self.indice_tamanho]}','tam'),
+                ('Densidade de rios',self.densidades_rios[self.indice_rios],'rios'),
+                ('Seed do mapa',str(self.seed),'seed'),
             ]
             for rotulo,valor,chave in linhas:
                 self.tela.blit(self.fonte_pequena.render(f'{rotulo}: {valor}',True,(230,230,230)),(x,y+8))
                 menos=pygame.Rect(painel.right-135,y,42,34); mais=pygame.Rect(painel.right-82,y,42,34)
                 self.botao(menos,'<'); self.botao(mais,'>'); botoes[chave]=(menos,mais)
                 if chave=='cor': pygame.draw.rect(self.tela,CORES_JOGADOR[valor],(x+245,y+8,46,20),border_radius=3)
-                y+=42
-            y+=8; self.tela.blit(self.fonte.render('Distribuição do mundo',True,(245,235,195)),(x,y)); y+=32
+                y+=36
+            y+=6; self.tela.blit(self.fonte.render('Distribuição do mundo',True,(245,235,195)),(x,y)); y+=28
             ter_botoes={}
             for terreno in self.ordem_terrenos:
                 self.tela.blit(self.fonte_pequena.render(f'{terreno}: {self.percentuais[terreno]}%',True,(230,230,230)),(x,y+7))
                 menos=pygame.Rect(painel.right-135,y,42,32); mais=pygame.Rect(painel.right-82,y,42,32)
-                self.botao(menos,'-'); self.botao(mais,'+'); ter_botoes[terreno]=(menos,mais); y+=36
-            iniciar=pygame.Rect(painel.centerx-125,painel.bottom-58,250,42); self.botao(iniciar,'INICIAR JOGO',True,(49,112,68))
+                self.botao(menos,'-'); self.botao(mais,'+'); ter_botoes[terreno]=(menos,mais); y+=31
+            iniciar=pygame.Rect(painel.centerx-255,painel.bottom-58,245,42); self.botao(iniciar,'INICIAR JOGO',True,(49,112,68))
+            carregar=pygame.Rect(painel.centerx+10,painel.bottom-58,245,42); self.botao(carregar,'CARREGAR JOGO',existe_save(),(58,82,112) if existe_save() else None)
             pygame.display.flip()
             for e in pygame.event.get():
                 if e.type==pygame.QUIT: return None
@@ -97,10 +105,15 @@ class MenuConfiguracao:
                         elif chave=='cpu': self.numero_cpus=max(0,min(3,self.numero_cpus+d))
                         elif chave=='dif': self.indice_dif=(self.indice_dif+d)%len(self.dificuldades)
                         elif chave=='tam': self.indice_tamanho=(self.indice_tamanho+d)%len(self.tamanhos)
+                        elif chave=='rios': self.indice_rios=(self.indice_rios+d)%len(self.densidades_rios)
+                        elif chave=='seed': self.seed=max(1,min(2_147_483_646,self.seed+d))
                     if iniciar.collidepoint(pos):
                         tam=self.tamanhos[self.indice_tamanho]; nome_cor=self.cores[self.indice_cor]
                         return {'percentuais':self.percentuais.copy(),'largura_mapa':tam,'altura_mapa':tam,
                                 'civilizacao':self.civilizacoes[self.indice_civ],'nome_cor_jogador':nome_cor,
                                 'cor_jogador':CORES_JOGADOR[nome_cor],'numero_cpus':self.numero_cpus,
-                                'dificuldade':self.dificuldades[self.indice_dif]}
+                                'dificuldade':self.dificuldades[self.indice_dif],
+                                'densidade_rios':self.densidades_rios[self.indice_rios], 'seed':self.seed}
+                    if carregar.collidepoint(pos) and existe_save():
+                        return {'carregar_save': ARQUIVO_SAVE_PADRAO}
             relogio.tick(60)

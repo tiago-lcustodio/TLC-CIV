@@ -18,7 +18,15 @@ def main():
         configuracao = MenuConfiguracao(tela).executar()
         if configuracao is None:
             break
-        resultado = Jogo(tela, configuracao).executar()
+        if configuracao.get('carregar_save'):
+            try:
+                jogo = Jogo.carregar_salvo(tela, configuracao['carregar_save'])
+            except Exception as exc:
+                print(f'Falha ao carregar save: {exc}')
+                continue
+        else:
+            jogo = Jogo(tela, configuracao)
+        resultado = jogo.executar()
         if resultado != 'novo':
             break
     pygame.quit()

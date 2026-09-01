@@ -24,6 +24,7 @@ CIVILIZACOES = {
         'unidade_especial': None,
         'construcao_especial': None,
         'modificadores': [],
+        'desbloqueios': [],
     }
     for nome in ['Romanos', 'Egípcios', 'Gregos', 'Persas', 'Fenícios', 'Celtas']
 }
@@ -33,28 +34,36 @@ ERAS = ['Antiga', 'Clássica', 'Medieval', 'Renascimento', 'Industrial', 'Modern
 # Ícones Unicode: permanecem independentes de sprites/PNG.
 UNIDADES = {
     'Colono': {
-        'nome': 'Colono', 'sigla': 'ST', 'letra': 'C', 'icone': '⚑', 'movimento': 1, 'dominio': 'terra',
+        'nome': 'Colono', 'sigla': 'ST', 'letra': 'S', 'marcador': 'S+', 'icone': '⚑', 'movimento': 1, 'dominio': 'terra',
         'custo_producao': 14, 'tecnologia': None, 'era': 'Antiga',
+        'requisitos': [{'tipo': 'populacao', 'minimo': 2}],
         'populacao_min': 2, 'consome_populacao': 1, 'melhorias_max': 0,
         'capacidade_transporte': 0,
+        'forca': 0, 'defesa': 2, 'vida_max': 100, 'alcance': 0, 'classe': 'civil',
     },
     'Guerreiro': {
-        'nome': 'Guerreiro', 'sigla': 'WA', 'letra': 'G', 'icone': '⚔', 'movimento': 1, 'dominio': 'terra',
+        'nome': 'Guerreiro', 'sigla': 'WA', 'letra': 'W', 'marcador': 'W*', 'icone': '⚔', 'movimento': 1, 'dominio': 'terra',
         'custo_producao': 12, 'tecnologia': None, 'era': 'Antiga',
+        'requisitos': [],
         'populacao_min': 0, 'consome_populacao': 0, 'melhorias_max': 0,
         'capacidade_transporte': 0,
+        'forca': 10, 'defesa': 8, 'vida_max': 100, 'alcance': 1, 'classe': 'corpo_a_corpo',
     },
     'Trabalhador': {
-        'nome': 'Trabalhador', 'sigla': 'WK', 'letra': 'T', 'icone': '⚒', 'movimento': 1, 'dominio': 'terra',
+        'nome': 'Trabalhador', 'sigla': 'WK', 'letra': 'W', 'marcador': 'W#', 'icone': '⚒', 'movimento': 1, 'dominio': 'terra',
         'custo_producao': 10, 'tecnologia': None, 'era': 'Antiga',
+        'requisitos': [],
         'populacao_min': 0, 'consome_populacao': 0, 'melhorias_max': 3,
         'capacidade_transporte': 0,
+        'forca': 0, 'defesa': 3, 'vida_max': 100, 'alcance': 0, 'classe': 'civil',
     },
     'Galé': {
-        'nome': 'Galé', 'sigla': 'GA', 'letra': 'L', 'icone': '⛵', 'movimento': 3, 'dominio': 'mar_raso',
+        'nome': 'Galé', 'sigla': 'GA', 'letra': 'G', 'marcador': 'G~', 'icone': '⛵', 'movimento': 3, 'dominio': 'mar_raso',
         'custo_producao': 16, 'tecnologia': None, 'era': 'Antiga',
+        'requisitos': [{'tipo': 'costeira'}],
         'populacao_min': 0, 'consome_populacao': 0, 'melhorias_max': 0,
         'capacidade_transporte': 1,
+        'forca': 8, 'defesa': 7, 'vida_max': 100, 'alcance': 1, 'classe': 'naval',
         'transporta_dominios': ['terra'],
     },
 }
@@ -62,14 +71,14 @@ UNIDADES = {
 CONSTRUCOES = {
     'Templo': {
         'nome': 'Templo', 'sigla': 'TP', 'custo_producao': 20,
-        'tecnologia': None, 'era': 'Antiga',
+        'tecnologia': None, 'era': 'Antiga', 'requisitos': [],
         'modificadores': [
-            {'atributo': 'fe_por_turno', 'operacao': 'somar', 'valor': 1}
+            {'atributo': 'fe_por_turno', 'operacao': 'somar', 'valor': 1, 'escopo': 'cidade', 'duracao': None}
         ],
     },
     'Muralha': {
         'nome': 'Muralha', 'sigla': 'MU', 'custo_producao': 16,
-        'tecnologia': None, 'era': 'Antiga', 'modificadores': [],
+        'tecnologia': None, 'era': 'Antiga', 'requisitos': [], 'modificadores': [],
     },
 }
 
@@ -77,11 +86,15 @@ TECNOLOGIAS = {
     'Conhecimento Inicial': {
         'nome': 'Conhecimento Inicial', 'era': 'Antiga', 'pre_requisitos': [],
         'custo_ciencia': 0, 'desbloqueia_unidades': [],
-        'desbloqueia_construcoes': [], 'modificadores': [],
+        'desbloqueia_construcoes': [], 'desbloqueios': [], 'requisitos': [], 'modificadores': [],
     }
 }
 
 POLITICAS = {}
+
+# Recursos que pertencem à civilização inteira, e não a uma cidade específica.
+RECURSOS_GLOBAIS = ('ouro', 'ciencia', 'fe')
+RECURSOS_LOCAIS_CIDADE = ('alimento', 'producao', 'lealdade', 'felicidade')
 
 # Economia deliberadamente baixa no começo. Tecnologias e melhorias escalam depois.
 RENDIMENTOS_BASE_CIDADE = {
@@ -135,11 +148,11 @@ VARIANTES_TERRENO = {
 
 # Melhorias terrestres atuais. Pesca fica preparada para tecnologia futura.
 MELHORIAS = {
-    'Fazenda': {'icone': '♨', 'bonus': {'alimento': 1}},
-    'Pasto': {'icone': '♧', 'bonus': {'alimento': 1}},
+    'Fazenda': {'icone': '♨', 'bonus': {'alimento': 1}, 'requisitos': []},
+    'Pasto': {'icone': '♧', 'bonus': {'alimento': 1}, 'requisitos': []},
     # Preparadas para tecnologias futuras; ainda não aparecem para o Trabalhador.
-    'Mina': {'icone': '⛏', 'bonus': {'producao': 1}},
-    'Barco de Pesca': {'icone': '⚓', 'bonus': {'alimento': 1}},
+    'Mina': {'icone': '⛏', 'bonus': {'producao': 1}, 'requisitos': []},
+    'Barco de Pesca': {'icone': '⚓', 'bonus': {'alimento': 1}, 'requisitos': []},
 }
 
 # Efeitos de composição do entorno: pequenos, para não inflar a economia.
@@ -207,9 +220,18 @@ INFRAESTRUTURA = {
 
 # Geração procedural de rios. Números provisórios e fáceis de balancear.
 CONFIG_RIOS = {
-    'densidade_por_1000_tiles': 0.45,
-    'comprimento_minimo': 4,
-    'tentativas_por_rio': 12,
+    # Meta de rios em um mapa-base 36x36; cresce proporcionalmente ao lado equivalente do mapa.
+    # Valores mais altos deixam a hidrografia claramente presente sem explodir nos mapas grandes.
+    'densidades': {
+        'Poucos': 5.0,
+        'Médio': 10.0,
+        'Alto': 18.0,
+    },
+    'comprimento_minimo': 5,
+    'tentativas_por_rio': 40,
+    # Bacias diferentes mantêm uma faixa de separação visual/hidrológica.
+    'distancia_min_bacias': {'Poucos': 2, 'Médio': 1, 'Alto': 1},
+    'max_afluentes_por_rio': 2,
     'terrenos_nascente': ['Grama'],
     'terrenos_percurso': ['Grama', 'Deserto', 'Neve'],
 }

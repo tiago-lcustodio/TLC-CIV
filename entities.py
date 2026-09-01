@@ -1,12 +1,14 @@
 import math
 
 from data import UNIDADES, CONSTRUCOES, LIMITES_LEALDADE
+from requirements import MotorRequisitos
 
 
 class Unidade:
-    def __init__(self, tipo, x, y, dono_id):
+    def __init__(self, tipo, x, y, dono_id, entidade_id=None):
         dados = UNIDADES[tipo]
         self.tipo = tipo
+        self.id = entidade_id
         self.x = x
         self.y = y
         self.dono_id = dono_id
@@ -19,6 +21,15 @@ class Unidade:
         self.melhorias_construidas = 0
         self.embarcada_em = None
         self.carga = []
+        self.forca = dados.get('forca', 0)
+        self.defesa = dados.get('defesa', 0)
+        self.vida_max = dados.get('vida_max', 100)
+        self.vida = self.vida_max
+        self.alcance = dados.get('alcance', 1)
+        self.classe = dados.get('classe', 'outro')
+        self.experiencia = 0
+        self.nivel = 1
+        self.modificadores_temporarios = []
 
     @property
     def icone(self):
@@ -31,6 +42,10 @@ class Unidade:
     @property
     def letra(self):
         return UNIDADES[self.tipo].get('letra', self.tipo[:1].upper())
+
+    @property
+    def marcador(self):
+        return UNIDADES[self.tipo].get('marcador', self.letra)
 
     @property
     def dominio(self):
@@ -136,12 +151,27 @@ class Unidade:
             return None
         return max(0, self.melhorias_max - self.melhorias_construidas)
 
+    def adicionar_modificador_temporario(self, modificador):
+        self.modificadores_temporarios.append(dict(modificador))
+
+    def avancar_modificadores_temporarios(self):
+        ativos=[]
+        for mod in self.modificadores_temporarios:
+            duracao=mod.get('duracao')
+            if duracao is None:
+                ativos.append(mod); continue
+            duracao=int(duracao)-1
+            if duracao>0:
+                novo=dict(mod); novo['duracao']=duracao; ativos.append(novo)
+        self.modificadores_temporarios=ativos
+
 
 class Cidade:
     # Crescimento deliberadamente mais lento: limites dobrados em relação à v0.10.
     LIMITES_POPULACAO = [20, 40, 100, 200, 400, 1000]
 
-    def __init__(self, nome, x, y, dono_id):
+    def __init__(self, nome, x, y, dono_id, entidade_id=None):
+        self.id = entidade_id
         self.nome = nome
         self.x = x
         self.y = y
@@ -166,6 +196,7 @@ class Cidade:
         self.raio_territorio = 1
         self.tiles_territorio = set()
         self.limites_lealdade_atingidos = set()
+        self.modificadores_temporarios = []
 
     def limite_proxima_populacao(self):
         i = self.populacao - 1
@@ -202,15 +233,30 @@ class Cidade:
                 expansoes += 1
         return cresceu, expansoes
 
-    def iniciar_producao(self, categoria, nome, jogador, producao_por_turno=1):
+    def adicionar_modificador_temporario(self, modificador):
+        self.modificadores_temporarios.append(dict(modificador))
+
+    def avancar_modificadores_temporarios(self):
+        ativos=[]
+        for mod in self.modificadores_temporarios:
+            duracao=mod.get('duracao')
+            if duracao is None:
+                ativos.append(mod); continue
+            duracao=int(duracao)-1
+            if duracao>0:
+                novo=dict(mod); novo['duracao']=duracao; ativos.append(novo)
+        self.modificadores_temporarios=ativos
+
+    def iniciar_producao(self, categoria, nome, jogador, producao_por_turno=1, jogo=None):
         if self.producao_nome is not None:
             return False, 'A cidade já possui uma produção em andamento.'
         if categoria == 'unidade':
             dados = UNIDADES.get(nome)
             if not dados:
                 return False, 'Unidade inválida.'
-            if not jogador.possui_tecnologia(dados.get('tecnologia')):
-                return False, 'Tecnologia necessária ainda não pesquisada.'
+            ok, motivo = MotorRequisitos.verificar(dados, jogador, jogo=jogo, cidade=self)
+            if not ok:
+                return False, motivo
             if self.populacao < dados.get('populacao_min', 0):
                 return False, f'População insuficiente para produzir {nome}.'
             custo = dados['custo_producao']
@@ -221,8 +267,9 @@ class Cidade:
                 return False, 'Construção inválida.'
             if nome in self.construcoes:
                 return False, f'{nome} já existe na cidade.'
-            if not jogador.possui_tecnologia(dados.get('tecnologia')):
-                return False, 'Tecnologia necessária ainda não pesquisada.'
+            ok, motivo = MotorRequisitos.verificar(dados, jogador, jogo=jogo, cidade=self)
+            if not ok:
+                return False, motivo
             custo = dados['custo_producao']
 
         taxa = max(1, int(producao_por_turno))

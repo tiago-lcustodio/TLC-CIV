@@ -25,4 +25,4 @@ class ControladorIA:
                 if jogo.cidade_tem_agua_rasa_adjacente(cidade):
                     opcoes.append('Galé')
                 taxa = jogo.rendimentos_cidade(cidade)['producao']
-                cidade.iniciar_producao('unidade', random.choice(opcoes), jogador, taxa)
+                cidade.iniciar_producao('unidade', jogo.random.choice(opcoes), jogador, taxa, jogo)
