@@ -1,22 +1,25 @@
 import math
 import random
+import time
 import pygame
 
 from world import Mundo, VIZINHOS_8
-from entities import Unidade, Cidade
+from entities import Unidade, Cidade, AcampamentoBarbaro
 from players import Jogador
 from modifiers import MotorModificadores
-from ai import ControladorIA
+from ai import ControladorIA, ControladorBarbaro
 from timeline import CalendarioJogo
 from ids import GeradorIDs
 from events import (GerenciadorEventos, ON_TURN_START, ON_TURN_END, ON_CITY_FOUNDED, ON_CITY_GROWTH,
-                    ON_BORDER_EXPANDED, ON_UNIT_CREATED, ON_BUILDING_COMPLETED)
+                    ON_BORDER_EXPANDED, ON_UNIT_CREATED, ON_BUILDING_COMPLETED, ON_CITY_REVOLT, ON_CITY_SECESSION, ON_FIRST_CONTACT)
 from requirements import MotorRequisitos
 from savegame import salvar_jogo, ler_save, ARQUIVO_SAVE_PADRAO
 from data import (
     CORES_JOGADOR, CIVILIZACOES, UNIDADES, CONSTRUCOES,
     RENDIMENTOS_BASE_CIDADE, REGRAS_ENTORNO_CIDADE, ICONES_RECURSOS, ICONES_TERRENO, MELHORIAS, INFRAESTRUTURA,
     TECNOLOGIAS, POLITICAS, RECURSOS_GLOBAIS, RECURSOS_LOCAIS_CIDADE,
+    DENSIDADES_CIDADES_ESTADO, DENSIDADES_BARBAROS, DIFICULDADES, CIDADES_ESTADO,
+    SAUDACOES_CIDADES_ESTADO, CORES_CIDADE_ESTADO, COR_BARBAROS, LIDERES_GENERICOS_M, LIDERES_GENERICOS_F,
 )
 
 TAMANHO_TILE = 34
@@ -54,9 +57,9 @@ class Jogo:
         # Indicadores gerais: tentamos usar 13 px e reduzimos só se a janela
         # não tiver largura suficiente. Isso mantém a barra legível sem sobreposição.
         if caminho_simbolos:
-            self.fontes_status_recursos = [pygame.font.Font(caminho_simbolos, tam) for tam in (15, 14, 13, 12, 11)]
+            self.fontes_status_recursos = [pygame.font.Font(caminho_simbolos, tam) for tam in (14, 13, 12, 11, 10, 9)]
         else:
-            self.fontes_status_recursos = [pygame.font.SysFont('arial', tam) for tam in (15, 14, 13, 12, 11)]
+            self.fontes_status_recursos = [pygame.font.SysFont('arial', tam) for tam in (14, 13, 12, 11, 10, 9)]
         self.fonte_status_recursos = self.fontes_status_recursos[0]
         self.fonte_marcador_unidade = pygame.font.SysFont('arial', 16, bold=True)
 
@@ -77,6 +80,11 @@ class Jogo:
         self.controladores_ia = {}
         self.unidades = []
         self.cidades = []
+        self.acampamentos_barbaros = []
+        self.jogador_barbaro = None
+        self.saudacoes_pendentes = []
+        self.saudacao_atual = None
+        self.rects_conversar_diplomacia = {}
         self.unidade_selecionada = None
         self.cidade_modal = None
         self.modal = None
@@ -93,24 +101,47 @@ class Jogo:
         self.ultimo_clique_esquerdo_tile = None
         self.limite_duplo_clique_ms = 350
 
+        # Turn Manager incremental (v0.21). O processamento do fim de turno é
+        # repartido em pequenos lotes para que o loop do Pygame continue vivo.
+        self.processando_turno = False
+        self.status_processamento_turno = ''
+        self._gerador_processamento_turno = None
+        self._mensagens_processamento_turno = []
+        self.orcamento_processamento_ms = 7.0
+        self.max_etapas_processamento_por_frame = 4
+
         self._criar_jogadores()
         self.jogador_humano = self.jogadores[0]
         self._criar_posicoes_iniciais()
+        self._criar_cidades_estado_iniciais()
+        self._criar_barbaros_iniciais()
         self._atualizar_layout()
         if self.jogador_humano.unidades:
             u = self.jogador_humano.unidades[0]
             self.centralizar_camera(u.x, u.y)
         self.atualizar_visibilidade_todos()
+        self.verificar_primeiros_contatos()
 
     # ---------- jogadores / setup ----------
+    def _escolher_lider_civilizacao(self, civilizacao):
+        dados=CIVILIZACOES.get(civilizacao,{})
+        genero=self.random.choice(['M','F'])
+        nomes=dados.get('lideres_m' if genero=='M' else 'lideres_f') or (LIDERES_GENERICOS_M if genero=='M' else LIDERES_GENERICOS_F)
+        return self.random.choice(nomes), genero
+
     def _criar_jogadores(self):
-        humano = Jogador(0, 'Jogador', self.configuracao['cor_jogador'], self.configuracao['civilizacao'], True, self.configuracao['dificuldade'], self.gerador_ids.novo('P'))
+        humano = Jogador(0, 'Jogador', self.configuracao['cor_jogador'], self.configuracao['civilizacao'], True,
+                         self.configuracao['dificuldade'], self.gerador_ids.novo('P'), tipo='civilizacao', lider_nome='Jogador')
         self.jogadores.append(humano)
         civs = [c for c in CIVILIZACOES if c != humano.civilizacao]
         cores = [c for c in CORES_JOGADOR if tuple(CORES_JOGADOR[c]) != tuple(humano.cor)]
         self.random.shuffle(civs); self.random.shuffle(cores)
         for i in range(self.configuracao.get('numero_cpus', 0)):
-            cpu = Jogador(i + 1, f'CPU {i+1}', CORES_JOGADOR[cores[i % len(cores)]], civs[i % len(civs)], False, self.configuracao['dificuldade'], self.gerador_ids.novo('P'))
+            civ=civs[i % len(civs)]
+            lider,genero=self._escolher_lider_civilizacao(civ)
+            cpu = Jogador(i + 1, f'CPU {i+1}', CORES_JOGADOR[cores[i % len(cores)]], civ, False,
+                          self.configuracao['dificuldade'], self.gerador_ids.novo('P'), tipo='civilizacao',
+                          lider_nome=lider, lider_genero=genero)
             self.jogadores.append(cpu)
             self.controladores_ia[cpu.id] = ControladorIA(cpu.id)
 
@@ -135,6 +166,74 @@ class Jogo:
             x, y = self._posicao_passavel_proxima(*alvo, ocupadas)
             ocupadas.add((x, y))
             self._adicionar_unidade(Unidade('Colono', x, y, jogador.id, self.gerador_ids.novo('U')))
+
+    def _novo_id_jogador_numerico(self):
+        return max([j.id for j in self.jogadores], default=-1) + 1
+
+    def _distancia_minima_entidades(self, x, y, minimo=6):
+        for c in self.cidades:
+            if max(abs(c.x-x),abs(c.y-y)) < minimo: return False
+        for u in self.unidades:
+            if not u.esta_embarcada and max(abs(u.x-x),abs(u.y-y)) < minimo: return False
+        for a in self.acampamentos_barbaros:
+            if max(abs(a.x-x),abs(a.y-y)) < minimo: return False
+        return True
+
+    def _tile_aleatorio_livre(self, minimo=6, tentativas=500):
+        for _ in range(tentativas):
+            x=self.random.randrange(self.mundo.largura); y=self.random.randrange(self.mundo.altura)
+            if not self.mundo.passavel(x,y): continue
+            if self.cidade_em(x,y) or self.unidade_em(x,y): continue
+            if not self._distancia_minima_entidades(x,y,minimo): continue
+            return x,y
+        return None
+
+    def _criar_cidades_estado_iniciais(self):
+        perfil=self.configuracao.get('densidade_cidades_estado','Média')
+        base=DENSIDADES_CIDADES_ESTADO.get(perfil,3.0)
+        escala=((self.mundo.largura*self.mundo.altura)**0.5)/36.0
+        qtd=max(0,int(round(base*escala)))
+        nomes=list(CIDADES_ESTADO); self.random.shuffle(nomes)
+        for i in range(min(qtd,len(nomes))):
+            pos=self._tile_aleatorio_livre(minimo=6)
+            if not pos: break
+            nome=nomes[i]
+            jid=self._novo_id_jogador_numerico()
+            jogador=Jogador(jid,nome,CORES_CIDADE_ESTADO[i%len(CORES_CIDADE_ESTADO)],nome,False,
+                            self.configuracao['dificuldade'],self.gerador_ids.novo('P'),tipo='cidade_estado',lider_nome=nome)
+            self.jogadores.append(jogador)
+            c=Cidade(nome,pos[0],pos[1],jid,self.gerador_ids.novo('C'))
+            self._adicionar_cidade(c,emitir_evento=False)
+            jogador.capital_id=c.id; self._sincronizar_capitais()
+
+    def _criar_barbaros_iniciais(self):
+        perfil=self.configuracao.get('densidade_barbaros','Médio')
+        base=DENSIDADES_BARBAROS.get(perfil,2.0)
+        mult=DIFICULDADES.get(self.configuracao.get('dificuldade','Padrão'),{}).get('multiplicador_barbaros',1.0)
+        escala=((self.mundo.largura*self.mundo.altura)**0.5)/36.0
+        qtd=max(0,int(round(base*mult*escala)))
+        if qtd<=0: return
+        jid=self._novo_id_jogador_numerico()
+        barb=Jogador(jid,'Bárbaros',COR_BARBAROS,'Bárbaros',False,self.configuracao['dificuldade'],
+                     self.gerador_ids.novo('P'),tipo='barbaro',lider_nome='Clãs bárbaros')
+        self.jogadores.append(barb); self.jogador_barbaro=barb
+        self.controladores_ia[barb.id]=ControladorBarbaro(barb.id)
+        for _ in range(qtd):
+            pos=self._tile_aleatorio_livre(minimo=5)
+            if not pos: break
+            camp=AcampamentoBarbaro(pos[0],pos[1],barb.id,self.gerador_ids.novo('B'))
+            self.acampamentos_barbaros.append(camp)
+            candidatos=[pos]+[(pos[0]+dx,pos[1]+dy) for dx,dy in VIZINHOS_8]
+            self.random.shuffle(candidatos)
+            n=self.random.randint(1,3); criados=0
+            for x,y in candidatos:
+                if criados>=n: break
+                if not self.mundo.dentro(x,y) or not self.mundo.passavel(x,y) or self.unidade_em(x,y) or self.cidade_em(x,y): continue
+                self._adicionar_unidade(Unidade('Guerreiro',x,y,barb.id,self.gerador_ids.novo('U')),emitir_evento=False)
+                criados+=1
+
+    def acampamento_em(self,x,y):
+        return next((a for a in self.acampamentos_barbaros if a.ativo and a.x==x and a.y==y),None)
 
     def jogador_por_id(self, jogador_id):
         return next((j for j in self.jogadores if j.id == jogador_id), None)
@@ -304,10 +403,12 @@ class Jogo:
             except Exception: pass
         self.gerador_ids=GeradorIDs(); self.gerador_ids.importar(dados.get('id_counters',{}))
         self.eventos=GerenciadorEventos()
-        self.jogadores=[]; self.controladores_ia={}; self.unidades=[]; self.cidades=[]
+        self.jogadores=[]; self.controladores_ia={}; self.unidades=[]; self.cidades=[]; self.acampamentos_barbaros=[]; self.jogador_barbaro=None
+        self.saudacoes_pendentes=[]; self.saudacao_atual=None; self.rects_conversar_diplomacia={}
 
         for jd in dados.get('jogadores',[]):
-            j=Jogador(jd['id'],jd['nome'],jd['cor'],jd['civilizacao'],jd.get('humano',False),jd.get('dificuldade','Padrão'),jd.get('uid'))
+            j=Jogador(jd['id'],jd['nome'],jd['cor'],jd['civilizacao'],jd.get('humano',False),jd.get('dificuldade','Padrão'),jd.get('uid'),
+                      tipo=jd.get('tipo','civilizacao'),lider_nome=jd.get('lider_nome'),lider_genero=jd.get('lider_genero'))
             self.gerador_ids.observar(j.uid)
             j.tecnologias=set(jd.get('tecnologias',['Conhecimento Inicial']))
             j.politicas=set(jd.get('politicas',[])); j.era=jd.get('era','Antiga')
@@ -317,8 +418,11 @@ class Jogo:
             j.explorado={self._tupla_ponto(p) for p in jd.get('explorado',[])}
             j.visivel={self._tupla_ponto(p) for p in jd.get('visivel',[])}
             j.modificadores_temporarios=list(jd.get('modificadores_temporarios',[]))
+            j.contatos_diplomaticos=set(jd.get('contatos_diplomaticos',[]))
+            j.humor_relacoes={str(k):int(v) for k,v in jd.get('humor_relacoes',{}).items()}
             self.jogadores.append(j)
-            if not j.humano: self.controladores_ia[j.id]=ControladorIA(j.id)
+            if j.tipo=='civilizacao' and not j.humano: self.controladores_ia[j.id]=ControladorIA(j.id)
+            elif j.tipo=='barbaro': self.controladores_ia[j.id]=ControladorBarbaro(j.id); self.jogador_barbaro=j
         self.jogador_humano=next((j for j in self.jogadores if j.humano),self.jogadores[0])
 
         for cd in dados.get('cidades',[]):
@@ -327,7 +431,7 @@ class Jogo:
             c.custo_producao_atual=cd.get('custo_producao_atual',0); c.producao_por_turno_inicio=cd.get('producao_por_turno_inicio',0)
             c.turnos_producao_total=cd.get('turnos_producao_total',0); c.turnos_producao_restantes=cd.get('turnos_producao_restantes',0)
             c.populacao=cd.get('populacao',1); c.alimento=cd.get('alimento',0); c.producao=cd.get('producao',0)
-            c.lealdade=cd.get('lealdade',0); c.felicidade=cd.get('felicidade',1); c.capital=cd.get('capital',False)
+            c.lealdade=cd.get('lealdade',0); c.felicidade=cd.get('felicidade',1); c.em_revolta=cd.get('em_revolta',c.felicidade<=-5); c.capital=cd.get('capital',False)
             c.melhorias=[tuple(m) for m in cd.get('melhorias',[])]; c.raio_territorio=cd.get('raio_territorio',1)
             c.tiles_territorio={self._tupla_ponto(p) for p in cd.get('tiles_territorio',[])}
             c.limites_lealdade_atingidos=set(cd.get('limites_lealdade_atingidos',[])); c.modificadores_temporarios=list(cd.get('modificadores_temporarios',[]))
@@ -348,10 +452,18 @@ class Jogo:
             u.embarcada_em=unidades_por_id.get(tid) if tid else None
             u.carga=[unidades_por_id[x] for x in ud.get('carga_ids',[]) if x in unidades_por_id]
 
+        for ad in dados.get('acampamentos_barbaros',[]):
+            a=AcampamentoBarbaro(ad['x'],ad['y'],ad.get('dono_id',self.jogador_barbaro.id if self.jogador_barbaro else -1),ad.get('id'))
+            a.ativo=ad.get('ativo',True)
+            if a.id: self.gerador_ids.observar(a.id)
+            self.acampamentos_barbaros.append(a)
+
         self._sincronizar_capitais(); self.unidade_selecionada=None; self.cidade_modal=None; self.modal=None; self.menu_aberto=None
         self.notificacoes=[]; self.notificacao_atual=None; self.ajuda_contexto=None
+        self.processando_turno=False; self.status_processamento_turno=''; self._gerador_processamento_turno=None; self._mensagens_processamento_turno=[]
         self.offset_x=self.offset_y=0; self._atualizar_layout()
         self.atualizar_visibilidade_todos()
+        self.verificar_primeiros_contatos()
         if self.jogador_humano.unidades:
             self.centralizar_camera(self.jogador_humano.unidades[0].x,self.jogador_humano.unidades[0].y)
         elif self.jogador_humano.cidades:
@@ -599,6 +711,11 @@ class Jogo:
             'felicidade': sum(c.felicidade for c in jogador.cidades),
         }
 
+    def felicidade_media(self, jogador):
+        if not jogador.cidades:
+            return 0.0
+        return sum(c.felicidade for c in jogador.cidades) / len(jogador.cidades)
+
     def _texto_valores_bonus(self, valores):
         nomes = {'alimento':'Alimento','producao':'Produção','ouro':'Ouro','ciencia':'Ciência','fe':'Fé','lealdade':'Lealdade','felicidade':'Felicidade'}
         partes = []
@@ -651,6 +768,129 @@ class Jogo:
                     linhas.append(f'{cidade.nome} — {rotulo}: {self._texto_valores_bonus(valores)}')
         return linhas
 
+    # ---------- diplomacia / estabilidade urbana ----------
+    def jogadores_diplomaticos(self):
+        return [j for j in self.jogadores if j.tipo in ('civilizacao','cidade_estado') and not j.humano]
+
+    def _jogador_detectado_pelo_humano(self, outro):
+        vis=self.jogador_humano.visivel
+        if any((c.x,c.y) in vis for c in outro.cidades): return True
+        if any((u.x,u.y) in vis for u in outro.unidades if not u.esta_embarcada): return True
+        return False
+
+    def verificar_primeiros_contatos(self):
+        if not hasattr(self,'jogador_humano') or not self.jogador_humano:
+            return
+        for outro in self.jogadores_diplomaticos():
+            if outro.uid in self.jogador_humano.contatos_diplomaticos:
+                continue
+            if not self._jogador_detectado_pelo_humano(outro):
+                continue
+            if self.jogador_humano.registrar_contato(outro.uid,0):
+                outro.registrar_contato(self.jogador_humano.uid,0)
+                self.eventos.emitir(ON_FIRST_CONTACT,self.turno,jogador_a=self.jogador_humano.uid,jogador_b=outro.uid)
+                if outro.tipo=='cidade_estado':
+                    texto=self.random.choice(SAUDACOES_CIDADES_ESTADO).format(nome=outro.nome)
+                    titulo=f'Primeiro contato — Cidade-Estado de {outro.nome}'
+                else:
+                    dados=CIVILIZACOES.get(outro.civilizacao,{})
+                    fala=dados.get('saudacao','Saudações. Nosso povo reconhece sua civilização.')
+                    lider=outro.lider_nome or 'Líder desconhecido'
+                    texto=f'{lider}, líder dos {outro.civilizacao}: “{fala}”'
+                    titulo=f'Primeiro contato — {outro.civilizacao}'
+                self.saudacoes_pendentes.append({'titulo':titulo,'texto':texto,'jogador_uid':outro.uid})
+        self._abrir_proxima_saudacao()
+
+    def _abrir_proxima_saudacao(self):
+        if self.modal is None and self.saudacoes_pendentes:
+            self.saudacao_atual=self.saudacoes_pendentes.pop(0)
+            self.modal='saudacao'
+
+    def jogador_por_uid(self,uid):
+        return next((j for j in self.jogadores if j.uid==uid),None)
+
+    def contatos_diplomacia_humano(self):
+        saida=[]
+        for uid in self.jogador_humano.contatos_diplomaticos:
+            j=self.jogador_por_uid(uid)
+            if j and j.tipo in ('civilizacao','cidade_estado'):
+                saida.append(j)
+        return sorted(saida,key=lambda j:(j.tipo,j.civilizacao,j.nome))
+
+    def _impérios_adjacentes_cidade(self,cidade):
+        candidatos=[]
+        for outro in self.jogadores:
+            if outro.id==cidade.dono_id or outro.tipo!='civilizacao': continue
+            toca=False
+            for x,y in cidade.tiles_territorio:
+                for dx,dy in VIZINHOS_8:
+                    dona=self.cidade_dona_tile(x+dx,y+dy,outro.id)
+                    if dona is not None:
+                        toca=True; break
+                if toca: break
+            if toca: candidatos.append(outro)
+        return candidatos
+
+    def _redefinir_capital_se_preciso(self,jogador,cidade_removida):
+        if jogador.capital_id != cidade_removida.id:
+            return
+        restantes=[c for c in jogador.cidades if c is not cidade_removida]
+        jogador.capital_id=restantes[0].id if restantes else None
+
+    def _transferir_cidade(self,cidade,novo_jogador,motivo='transferência'):
+        antigo=self.jogador_por_id(cidade.dono_id)
+        if antigo:
+            self._redefinir_capital_se_preciso(antigo,cidade)
+            if cidade in antigo.cidades: antigo.cidades.remove(cidade)
+        cidade.dono_id=novo_jogador.id
+        cidade.lealdade=0
+        cidade.em_revolta=False
+        if cidade not in novo_jogador.cidades: novo_jogador.cidades.append(cidade)
+        if novo_jogador.capital_id is None: novo_jogador.capital_id=cidade.id
+        self._sincronizar_capitais()
+        self.eventos.emitir(ON_CITY_SECESSION,self.turno,cidade_id=cidade.id,
+                            antigo_dono=antigo.uid if antigo else None,novo_dono=novo_jogador.uid,motivo=motivo)
+
+    def _criar_cidade_estado_da_cidade(self,cidade):
+        jid=self._novo_id_jogador_numerico()
+        cor=CORES_CIDADE_ESTADO[jid % len(CORES_CIDADE_ESTADO)]
+        novo=Jogador(jid,cidade.nome,cor,cidade.nome,False,self.configuracao.get('dificuldade','Padrão'),
+                     self.gerador_ids.novo('P'),tipo='cidade_estado',lider_nome=cidade.nome)
+        self.jogadores.append(novo)
+        self._transferir_cidade(cidade,novo,'independência por baixa Lealdade')
+        novo.capital_id=cidade.id; self._sincronizar_capitais()
+        return novo
+
+    def verificar_estabilidade_cidade(self,cidade,notificar=False):
+        # Felicidade é local. A cidade entra/sai de revolta conforme o valor corrente.
+        estava=getattr(cidade,'em_revolta',False)
+        cidade.em_revolta=cidade.felicidade<=-5
+        if cidade.em_revolta and not estava:
+            texto=f'{cidade.nome} entrou EM REVOLTA: Felicidade {cidade.felicidade}.'
+            self.eventos.emitir(ON_CITY_REVOLT,self.turno,cidade_id=cidade.id,felicidade=cidade.felicidade)
+            if notificar: self.adicionar_notificacao(texto)
+        elif estava and not cidade.em_revolta and notificar:
+            self.adicionar_notificacao(f'{cidade.nome} saiu do estado de revolta.')
+
+        dono=self.jogador_por_id(cidade.dono_id)
+        if cidade.lealdade<=-5 and dono and dono.tipo=='civilizacao':
+            vizinhos=self._impérios_adjacentes_cidade(cidade)
+            if vizinhos and self.random.random()<0.5:
+                destino=self.random.choice(vizinhos)
+                antigo_nome=dono.civilizacao
+                self._transferir_cidade(cidade,destino,'adesão por baixa Lealdade')
+                texto=f'{cidade.nome} abandonou {antigo_nome} e aderiu aos {destino.civilizacao}.'
+                self.verificar_primeiros_contatos()
+            else:
+                antigo_nome=dono.civilizacao
+                estado=self._criar_cidade_estado_da_cidade(cidade)
+                texto=f'{cidade.nome} abandonou {antigo_nome} e tornou-se uma Cidade-Estado independente.'
+                # Se a cidade estiver visível, ela pode ser encontrada diplomaticamente imediatamente.
+                self.verificar_primeiros_contatos()
+            if notificar: self.adicionar_notificacao(texto)
+            return True
+        return False
+
     # ---------- movimento / transporte ----------
     def pode_fundar(self):
         u = self.unidade_selecionada
@@ -672,8 +912,17 @@ class Jogo:
     def ordenar_movimento_unidade(self, unidade, destino):
         if unidade.movimento <= 0 or unidade.esta_embarcada:
             unidade.cancelar_rota(); return False
-        rota = self.mundo.caminho((unidade.x, unidade.y), destino, unidade.dominio)
-        if not rota and destino != (unidade.x, unidade.y): return False
+        origem=(unidade.x,unidade.y)
+        if destino == origem:
+            rota=[]
+        elif (max(abs(destino[0]-origem[0]),abs(destino[1]-origem[1])) == 1
+              and self.mundo.dentro(*destino)
+              and self.mundo.passavel_para(destino[0],destino[1],unidade.dominio)):
+            # Movimento adjacente não precisa disparar Dijkstra pelo mapa inteiro.
+            rota=[destino]
+        else:
+            rota = self.mundo.caminho(origem, destino, unidade.dominio)
+        if not rota and destino != origem: return False
         unidade.definir_rota(rota)
         unidade.mover_ate_esgotar(lambda origem, destino: self.mundo.custo_movimento(origem, destino, unidade.dominio))
         unidade.cancelar_rota()
@@ -692,6 +941,7 @@ class Jogo:
 
         if self.ordenar_movimento_unidade(u, destino):
             self.atualizar_visibilidade_jogador(self.jogador_humano)
+            self.verificar_primeiros_contatos()
             mov = f'{u.movimento:.1f}'.rstrip('0').rstrip('.')
             self.mensagem = f'{u.tipo} moveu-se. Movimento: {mov}/{u.movimento_max}.'
         else:
@@ -782,6 +1032,7 @@ class Jogo:
         else:
             self.mensagem='A unidade não alcançou a cidade neste turno.'
         self.atualizar_visibilidade_jogador(self.jogador_humano)
+        self.verificar_primeiros_contatos()
 
     # ---------- cidades / produção ----------
     def fundar_cidade(self):
@@ -791,11 +1042,14 @@ class Jogo:
         nome=self.campo_nome.strip(); u=self.unidade_selecionada
         if not nome or not u or u.tipo!='Colono' or u.movimento<=0: return
         c=Cidade(nome,u.x,u.y,u.dono_id); self._adicionar_cidade(c); self._remover_unidade(u)
-        self.modal=None; self.atualizar_visibilidade_todos(); self.mensagem=f'Cidade {nome} fundada.'
+        self.modal=None; self.atualizar_visibilidade_todos(); self.verificar_primeiros_contatos(); self.mensagem=f'Cidade {nome} fundada.'
 
     def fundar_cidade_cpu(self,jogador,unidade):
-        nome=f'{jogador.civilizacao} {len(jogador.cidades)+1}'
-        self._adicionar_cidade(Cidade(nome,unidade.x,unidade.y,jogador.id)); self._remover_unidade(unidade)
+        lista=CIVILIZACOES.get(jogador.civilizacao,{}).get('cidades',[])
+        usados={c.nome for c in jogador.cidades}
+        nome=next((n for n in lista if n not in usados),None) or f'{jogador.civilizacao} {len(jogador.cidades)+1}'
+        self._adicionar_cidade(Cidade(nome,unidade.x,unidade.y,jogador.id,self.gerador_ids.novo('C')))
+        self._remover_unidade(unidade)
 
     def construir_melhoria(self,tipo):
         u=self.unidade_selecionada
@@ -864,43 +1118,71 @@ class Jogo:
             self.notificacao_atual=self.notificacoes.pop(0)
             self.modal='aviso'
 
-    def processar_cidades_jogador(self,jogador,notificar=False):
+    def _processar_cidade_turno(self, jogador, c, notificar=False):
+        """Processa uma única cidade e devolve as mensagens geradas."""
         mensagens=[]
-        for c in list(jogador.cidades):
-            r=self.rendimentos_cidade(c)
-            # Ouro, Ciência e Fé são recursos globais; a cidade apenas gera a taxa.
-            jogador.adicionar_recursos_globais(ouro=r.get('ouro',0), ciencia=r.get('ciencia',0), fe=r.get('fe',0))
-            locais={
-                'alimento':r.get('alimento',0), 'producao':0,
-                'lealdade':r.get('lealdade',0), 'felicidade':r.get('felicidade',0),
-                'ouro':0, 'ciencia':0, 'fe':0,
-            }
-            pop_anterior=c.populacao
-            cresceu, expansoes=c.adicionar_recursos(**locais)
-            if cresceu:
-                mensagens.append(f'{c.nome} cresceu para {c.populacao}')
-                self.eventos.emitir(ON_CITY_GROWTH,self.turno,cidade_id=c.id,populacao_anterior=pop_anterior,populacao=c.populacao)
-            if expansoes:
-                novos=self._expandir_territorio_cidade(c)
-                texto_exp=f'{c.nome} expandiu suas fronteiras para raio {c.raio_territorio} (+{novos} tiles).'
-                mensagens.append(texto_exp)
-                self.eventos.emitir(ON_BORDER_EXPANDED,self.turno,cidade_id=c.id,raio=c.raio_territorio,novos_tiles=novos)
-                if notificar: self.adicionar_notificacao(texto_exp)
-            resultado=c.avancar_producao()
-            if resultado:
-                categoria,nome=resultado
-                if categoria=='unidade':
-                    spawn=self._spawn(c,nome)
-                    if spawn:
-                        self._adicionar_unidade(Unidade(nome,*spawn,jogador.id,self.gerador_ids.novo('U')))
-                        texto=f'{c.nome} concluiu a unidade {nome}.'
-                    else:
-                        texto=f'{c.nome} concluiu {nome}, mas não há quadrado válido livre para posicioná-la.'
+        r=self.rendimentos_cidade(c)
+        # Ouro, Ciência e Fé são globais; Felicidade e Lealdade são locais da cidade.
+        jogador.adicionar_recursos_globais(ouro=r.get('ouro',0), ciencia=r.get('ciencia',0), fe=r.get('fe',0))
+        locais={
+            'alimento':r.get('alimento',0), 'producao':0,
+            'lealdade':r.get('lealdade',0), 'felicidade':r.get('felicidade',0),
+            'ouro':0, 'ciencia':0, 'fe':0,
+        }
+        pop_anterior=c.populacao
+        felicidade_anterior=c.felicidade
+        cresceu, expansoes=c.adicionar_recursos(**locais)
+        if cresceu:
+            mensagens.append(f'{c.nome} cresceu para {c.populacao}')
+            self.eventos.emitir(ON_CITY_GROWTH,self.turno,cidade_id=c.id,populacao_anterior=pop_anterior,populacao=c.populacao)
+            if c.felicidade < felicidade_anterior and notificar:
+                self.adicionar_notificacao(
+                    f'{c.nome} cresceu para População {c.populacao}. A pressão urbana reduziu a Felicidade local '
+                    f'de {felicidade_anterior} para {c.felicidade}.'
+                )
+        if expansoes:
+            novos=self._expandir_territorio_cidade(c)
+            texto_exp=f'{c.nome} expandiu suas fronteiras para raio {c.raio_territorio} (+{novos} tiles).'
+            mensagens.append(texto_exp)
+            self.eventos.emitir(ON_BORDER_EXPANDED,self.turno,cidade_id=c.id,raio=c.raio_territorio,novos_tiles=novos)
+            if notificar: self.adicionar_notificacao(texto_exp)
+
+        # Revolta e secessão são avaliadas antes da produção do turno.
+        secedeu=self.verificar_estabilidade_cidade(c,notificar=notificar)
+        if secedeu or c.dono_id != jogador.id:
+            return mensagens
+
+        # Estado EM REVOLTA já existe, mas por enquanto não bloqueia produção/economia.
+        resultado=c.avancar_producao()
+        if resultado:
+            categoria,nome=resultado
+            if categoria=='unidade':
+                spawn=self._spawn(c,nome)
+                if spawn:
+                    self._adicionar_unidade(Unidade(nome,*spawn,jogador.id,self.gerador_ids.novo('U')))
+                    texto=f'{c.nome} concluiu a unidade {nome}.'
                 else:
-                    self.eventos.emitir(ON_BUILDING_COMPLETED,self.turno,cidade_id=c.id,construcao=nome,dono_id=jogador.id)
-                    texto=f'{c.nome} concluiu a construção {nome}.'
-                mensagens.append(texto)
-                if notificar: self.adicionar_notificacao(texto)
+                    texto=f'{c.nome} concluiu {nome}, mas não há quadrado válido livre para posicioná-la.'
+            else:
+                self.eventos.emitir(ON_BUILDING_COMPLETED,self.turno,cidade_id=c.id,construcao=nome,dono_id=jogador.id)
+                texto=f'{c.nome} concluiu a construção {nome}.'
+            mensagens.append(texto)
+            if notificar: self.adicionar_notificacao(texto)
+        return mensagens
+
+    def iterar_cidades_jogador(self,jogador,notificar=False):
+        """Itera cidade a cidade para o Turn Manager poder devolver a UI entre elas."""
+        cidades=list(jogador.cidades)
+        total=len(cidades)
+        for indice,c in enumerate(cidades,1):
+            mensagens=self._processar_cidade_turno(jogador,c,notificar=notificar)
+            yield indice,total,c,mensagens
+
+    def processar_cidades_jogador(self,jogador,notificar=False):
+        # API síncrona mantida para testes/código auxiliar.
+        mensagens=[]
+        for _,_,_,novas in self.iterar_cidades_jogador(jogador,notificar=notificar):
+            mensagens.extend(novas)
         return mensagens
 
     def _avancar_efeitos_temporarios(self):
@@ -912,21 +1194,163 @@ class Jogo:
             unidade.avancar_modificadores_temporarios()
 
     def proximo_turno(self):
+        """Inicia o processamento incremental do próximo turno.
+
+        A função retorna imediatamente. O trabalho real é consumido por
+        ``processar_turno_incremental`` dentro do loop principal do Pygame.
+        """
+        if self.processando_turno:
+            return
+        if self.modal is not None:
+            return
+        self.processando_turno=True
+        self.menu_aberto=None
+        self.status_processamento_turno='Encerrando seu turno...'
+        self._mensagens_processamento_turno=[]
+        self._gerador_processamento_turno=self._sequencia_proximo_turno()
+        self.mensagem='Outras civilizações estão jogando agora... Aguarde.'
+
+    def _rotulo_jogador_processamento(self, jogador):
+        if jogador.tipo == 'barbaro':
+            return 'Bárbaros'
+        if jogador.tipo == 'cidade_estado':
+            if jogador.cidades:
+                return 'Cidade-Estado ' + jogador.cidades[0].nome
+            return jogador.nome
+        return jogador.civilizacao
+
+    def _sequencia_proximo_turno(self):
+        """Gerador do Turn Manager. Cada yield devolve a UI ao Pygame."""
         self.eventos.emitir(ON_TURN_END,self.turno,ano=self.calendario.ano)
-        mensagens=self.processar_cidades_jogador(self.jogador_humano,notificar=True)
-        for cpu in self.jogadores[1:]:
-            for u in cpu.unidades: u.novo_turno()
-            self.controladores_ia[cpu.id].jogar_turno(self,cpu)
-            mensagens.extend(self.processar_cidades_jogador(cpu,notificar=False))
-            self.atualizar_visibilidade_jogador(cpu)
+        self.status_processamento_turno='Encerrando seu turno — cidades humanas'
+        for indice,total,cidade,novas in self.iterar_cidades_jogador(self.jogador_humano,notificar=True):
+            self._mensagens_processamento_turno.extend(novas)
+            self.status_processamento_turno=f'Encerrando seu turno — cidade {indice}/{total}: {cidade.nome}'
+            yield
+        if not self.jogador_humano.cidades:
+            yield
+
+        # Snapshot mantém a mesma semântica da v0.20: jogadores criados por
+        # secessão durante este fechamento só começam a agir no turno seguinte.
+        outros=[j for j in list(self.jogadores) if j is not self.jogador_humano]
+        civs=[j for j in outros if j.tipo=='civilizacao']
+        cidades_estado=[j for j in outros if j.tipo=='cidade_estado']
+        barbaros=[j for j in outros if j.tipo=='barbaro']
+        grupos=[
+            ('Outras civilizações',civs),
+            ('Cidades-Estado',cidades_estado),
+            ('Bárbaros',barbaros),
+        ]
+
+        for nome_grupo, grupo in grupos:
+            if not grupo:
+                continue
+            for indice_jogador, outro in enumerate(grupo,1):
+                rotulo=self._rotulo_jogador_processamento(outro)
+                self.status_processamento_turno=(
+                    f'{nome_grupo} — {rotulo} ({indice_jogador}/{len(grupo)}): preparando unidades'
+                )
+                unidades=list(outro.unidades)
+                for indice,u in enumerate(unidades,1):
+                    u.novo_turno()
+                    # Renovar movimento é barato; ainda assim devolvemos a UI em
+                    # lotes para jogadores com muitos exércitos.
+                    if indice % 8 == 0:
+                        self.status_processamento_turno=(
+                            f'{nome_grupo} — {rotulo}: preparando unidades {indice}/{len(unidades)}'
+                        )
+                        yield
+                yield
+
+                controlador=self.controladores_ia.get(outro.id)
+                if controlador:
+                    iterador=getattr(controlador,'iterar_turno',None)
+                    if iterador:
+                        for detalhe in iterador(self,outro):
+                            self.status_processamento_turno=f'{nome_grupo} — {rotulo}: {detalhe}'
+                            yield
+                    else:
+                        self.status_processamento_turno=f'{nome_grupo} — {rotulo}: decisões da IA'
+                        controlador.jogar_turno(self,outro)
+                        yield
+
+                if outro.tipo != 'barbaro':
+                    for indice_c,total_c,cidade,novas in self.iterar_cidades_jogador(outro,notificar=False):
+                        self._mensagens_processamento_turno.extend(novas)
+                        self.status_processamento_turno=(
+                            f'{nome_grupo} — {rotulo}: cidade {indice_c}/{total_c} — {cidade.nome}'
+                        )
+                        yield
+
+                self.status_processamento_turno=f'{nome_grupo} — {rotulo}: atualizando visão'
+                self.atualizar_visibilidade_jogador(outro)
+                yield
+
+        self.status_processamento_turno='Atualizando efeitos temporários...'
         self._avancar_efeitos_temporarios()
+        yield
+
+        self.status_processamento_turno='Avançando calendário e preparando o novo turno...'
         self.turno += 1
         self.calendario.avancar()
-        for u in self.jogador_humano.unidades: u.novo_turno()
+        unidades_humanas=list(self.jogador_humano.unidades)
+        for indice,u in enumerate(unidades_humanas,1):
+            u.novo_turno()
+            if indice % 12 == 0:
+                yield
         self.eventos.emitir(ON_TURN_START,self.turno,ano=self.calendario.ano)
+        yield
+
+        self.status_processamento_turno='Atualizando mapa e Fog of War...'
         self.atualizar_visibilidade_todos()
+        yield
+
+        self.status_processamento_turno='Verificando novos contatos diplomáticos...'
+        self.verificar_primeiros_contatos()
+        yield
+
+        self.status_processamento_turno='Turno concluído.'
+        yield
+
+    def _finalizar_processamento_turno(self):
+        self.processando_turno=False
+        self._gerador_processamento_turno=None
+        mensagens=self._mensagens_processamento_turno
+        self._mensagens_processamento_turno=[]
+        self.status_processamento_turno=''
         self.mensagem='; '.join(mensagens[:3]) if mensagens else f'Turno {self.turno} — {self.calendario.texto}.'
-        self._abrir_proxima_notificacao()
+        if self.modal is None:
+            self._abrir_proxima_saudacao()
+        if self.modal is None:
+            self._abrir_proxima_notificacao()
+
+    def processar_turno_incremental(self):
+        """Consome uma pequena quantidade de trabalho por frame.
+
+        O orçamento é deliberadamente curto. Não há ``sleep``: se o trabalho é
+        simples, várias etapas cabem no mesmo frame; se uma etapa fica cara, o
+        controle volta à renderização logo depois dela.
+        """
+        if not self.processando_turno or self._gerador_processamento_turno is None:
+            return
+        inicio=time.perf_counter()
+        etapas=0
+        limite_segundos=max(0.001,float(self.orcamento_processamento_ms)/1000.0)
+        while self.processando_turno and etapas < self.max_etapas_processamento_por_frame:
+            if etapas > 0 and time.perf_counter()-inicio >= limite_segundos:
+                break
+            try:
+                next(self._gerador_processamento_turno)
+                etapas += 1
+            except StopIteration:
+                self._finalizar_processamento_turno()
+                break
+            except Exception as exc:
+                self.processando_turno=False
+                self._gerador_processamento_turno=None
+                self.status_processamento_turno=''
+                self.mensagem=f'Erro durante processamento do turno: {exc}'
+                raise
 
     # ---------- interface ----------
     def botao(self,rect,texto,ativo=True,cor=None):
@@ -1005,14 +1429,15 @@ class Jogo:
         estoque=self.totais_civilizacao(self.jogador_humano)
         taxa=self.taxas_civilizacao(self.jogador_humano)
         # Regra visual: número principal = estoque; (+X) = ganho por turno. Produção é capacidade/turno.
+        felicidade_media=self.felicidade_media(self.jogador_humano)
         recursos=(
-            f'{ICONES_RECURSOS["alimento"]}{estoque["alimento"]}(+{taxa["alimento"]})  '
-            f'{ICONES_RECURSOS["producao"]}+{taxa["producao"]}/t  '
-            f'{ICONES_RECURSOS["ouro"]}{estoque["ouro"]}(+{taxa["ouro"]})  '
-            f'{ICONES_RECURSOS["ciencia"]}{estoque["ciencia"]}(+{taxa["ciencia"]})  '
-            f'{ICONES_RECURSOS["fe"]}{estoque["fe"]}(+{taxa["fe"]})  '
-            f'{ICONES_RECURSOS["lealdade"]}{estoque["lealdade"]}(+{taxa["lealdade"]})  '
-            f'{ICONES_RECURSOS["felicidade"]}{estoque["felicidade"]}'
+            f'{ICONES_RECURSOS["alimento"]} Alimento total {estoque["alimento"]} (+{taxa["alimento"]}) | '
+            f'{ICONES_RECURSOS["producao"]} Produção total +{taxa["producao"]}/t | '
+            f'{ICONES_RECURSOS["ouro"]} Ouro {estoque["ouro"]} (+{taxa["ouro"]}) | '
+            f'{ICONES_RECURSOS["ciencia"]} Ciência {estoque["ciencia"]} (+{taxa["ciencia"]}) | '
+            f'{ICONES_RECURSOS["fe"]} Fé {estoque["fe"]} (+{taxa["fe"]}) | '
+            f'{ICONES_RECURSOS["lealdade"]} Lealdade total {estoque["lealdade"]} (+{taxa["lealdade"]}) | '
+            f'{ICONES_RECURSOS["felicidade"]} Felicidade média {felicidade_media:.1f}'
         )
         # Recursos tentam 15 px e diminuem apenas até 11 px. A posição inicial
         # considera o fim real do bloco Turno/Ano, portanto os blocos nunca se sobrepõem.
@@ -1030,18 +1455,20 @@ class Jogo:
         x_recursos=max(inicio_minimo_recursos,self.largura_tela-surf.get_width()-10)
         self.tela.blit(surf,(x_recursos,ALTURA_BARRA_MENU+6))
 
-        # Linha 3: ferramentas.
+        # Linha 3: ferramentas. Durante o processamento incremental do turno,
+        # os controles permanecem visíveis, mas ficam desabilitados.
         pygame.draw.rect(self.tela,(48,53,60),(0,ALTURA_BARRA_MENU+ALTURA_BARRA_STATUS,self.largura_tela,ALTURA_BARRA_FERRAMENTAS))
-        self.botao(self.rect_proximo_turno,'Próximo Turno',True,(57,102,69))
-        self.botao(self.rect_status_geral,'Status Geral',True,(61,70,82))
+        controles_ativos=not self.processando_turno
+        self.botao(self.rect_proximo_turno,'Próximo Turno',controles_ativos,(57,102,69) if controles_ativos else None)
+        self.botao(self.rect_status_geral,'Status Geral',controles_ativos,(61,70,82) if controles_ativos else None)
         for rect,txt in ((self.rect_politica,'Política'),(self.rect_tecnologia,'Tecnologia'),(self.rect_religiao,'Religião'),(self.rect_economia,'Economia'),(self.rect_diplomacia,'Diplomacia'),(self.rect_militar,'Militar')):
-            self.botao(rect,txt)
-        if self.pode_fundar(): self.botao(self.rect_fundar,'Fundar Cidade',True,(128,88,48))
-        elif self.unidade_selecionada and self.unidade_selecionada.tipo=='Trabalhador':
+            self.botao(rect,txt,controles_ativos)
+        if controles_ativos and self.pode_fundar(): self.botao(self.rect_fundar,'Fundar Cidade',True,(128,88,48))
+        elif controles_ativos and self.unidade_selecionada and self.unidade_selecionada.tipo=='Trabalhador':
             ativo=self.trabalhador_pode_melhorar(); self.botao(self.rect_fazenda,'Fazenda +1',ativo); self.botao(self.rect_pasto,'Pasto +1',ativo)
             self.botao(self.rect_estrada,'Estrada',self.trabalhador_pode_construir_estrada())
 
-        if self.menu_aberto=='Jogo':
+        if self.menu_aberto=='Jogo' and not self.processando_turno:
             pygame.draw.rect(self.tela,(49,53,60),(10,ALTURA_BARRA_MENU,155,120)); self._item_menu(self.rect_novo,'Novo'); self._item_menu(self.rect_salvar,'Salvar'); self._item_menu(self.rect_carregar,'Carregar'); self._item_menu(self.rect_sair,'Sair')
         elif self.menu_aberto=='Ajuda':
             pygame.draw.rect(self.tela,(49,53,60),self.rect_sobre); self._item_menu(self.rect_sobre,'Sobre')
@@ -1154,7 +1581,18 @@ class Jogo:
                         mi=MELHORIAS.get(mel,{}).get('icone','•')
                         ms=self.fonte_icone.render(mi,True,(35,25,15)); self.tela.blit(ms,(sx+2,sy+TAMANHO_TILE-ms.get_height()+2))
         self.desenhar_infraestrutura()
-        self.desenhar_cidades(); self.desenhar_unidades(); self.tela.set_clip(None)
+        self.desenhar_acampamentos_barbaros(); self.desenhar_cidades(); self.desenhar_unidades(); self.tela.set_clip(None)
+
+    def desenhar_acampamentos_barbaros(self):
+        vis=self.jogador_humano.visivel
+        for a in self.acampamentos_barbaros:
+            if not a.ativo or (a.x,a.y) not in vis: continue
+            sx,sy=self.tile_para_tela(a.x,a.y)
+            r=pygame.Rect(sx+7,sy+7,TAMANHO_TILE-14,TAMANHO_TILE-14)
+            pygame.draw.rect(self.tela,COR_BARBAROS,r,border_radius=3)
+            pygame.draw.rect(self.tela,(230,190,150),r,2,border_radius=3)
+            t=self.fonte_mini.render('B!',True,(255,235,205))
+            self.tela.blit(t,t.get_rect(center=r.center))
 
     def desenhar_cidades(self):
         vis=self.jogador_humano.visivel
@@ -1163,7 +1601,8 @@ class Jogo:
             dono=self.jogador_por_id(c.dono_id); sx,sy=self.tile_para_tela(c.x,c.y)
             pygame.draw.rect(self.tela,dono.cor,(sx+5,sy+5,TAMANHO_TILE-10,TAMANHO_TILE-10),border_radius=4)
             txt=self.fonte_icone_grande.render('◈',True,(255,255,255)); self.tela.blit(txt,txt.get_rect(center=(sx+17,sy+17)))
-            nome=self.fonte_pequena.render(f'{c.nome} ({c.populacao})',True,(255,255,255)); fundo=pygame.Rect(sx-2,sy-18,nome.get_width()+8,18); pygame.draw.rect(self.tela,dono.cor,fundo,border_radius=3); self.tela.blit(nome,(fundo.x+4,fundo.y+1))
+            estado = ' [REVOLTA]' if c.em_revolta else ''
+            nome=self.fonte_pequena.render(f'{c.nome} ({c.populacao}){estado}',True,(255,255,255)); fundo=pygame.Rect(sx-2,sy-18,nome.get_width()+8,18); pygame.draw.rect(self.tela,dono.cor,fundo,border_radius=3); self.tela.blit(nome,(fundo.x+4,fundo.y+1))
 
     def desenhar_unidades(self):
         vis=self.jogador_humano.visivel
@@ -1209,7 +1648,8 @@ class Jogo:
         r, detalhes=self.detalhamento_rendimentos_cidade(c)
         limite=c.limite_proxima_populacao(); prox_leal=c.proximo_limite_lealdade()
 
-        resumo=f'População: {c.populacao} | próximo alimento: {limite} | território: raio {c.raio_territorio}'
+        estado=' | EM REVOLTA' if c.em_revolta else ''
+        resumo=f'População: {c.populacao} | próximo alimento: {limite} | território: raio {c.raio_territorio}{estado}'
         self.desenhar_texto_quebrado(resumo,self.fonte_pequena,(220,220,220),caixa.x+25,caixa.y+58,caixa.width-50,1,caixa.y+84)
 
         recursos_cidade = [
@@ -1223,13 +1663,16 @@ class Jogo:
             if chave == 'producao': txt=f'Produção local: +{ganho}/turno'
             elif escopo == 'global': txt=f'{chave.capitalize()}: +{ganho}/turno → estoque global {estoque}'
             else:
-                txt=f'{chave.capitalize()}: {estoque}'
+                rotulo='Felicidade local' if chave=='felicidade' else ('Lealdade local' if chave=='lealdade' else chave.capitalize())
+                txt=f'{rotulo}: {estoque}'
                 if ganho: txt += f' ({ganho:+d}/turno)'
+                if chave=='felicidade' and c.em_revolta: txt += ' — EM REVOLTA'
             px=caixa.x+25+(i%4)*colw; py=caixa.y+88+(i//4)*24
             self.desenhar_texto_quebrado(txt,self.fonte_negrito,(225,225,225),px,py,colw-8,0,py+22)
 
         yinfo=caixa.y+140
-        leal_txt=f'Próxima expansão por Lealdade: {prox_leal if prox_leal is not None else "máximo provisório"}'
+        leal_txt=(f'Próxima expansão por Lealdade: {prox_leal if prox_leal is not None else "máximo provisório"} | '
+                  f'Felicidade é LOCAL; População 7+ reduz 1 por novo nível; -5 = EM REVOLTA; Lealdade -5 = secessão.')
         yinfo=self.desenhar_texto_quebrado(leal_txt,self.fonte_pequena,(205,190,225),caixa.x+25,yinfo,caixa.width-50,1,caixa.y+190)
         _, efeitos = self.modificadores_entorno_cidade(c)
         entorno='Entorno: '+(', '.join(efeitos) if efeitos else 'sem bônus/multas gerais')
@@ -1349,6 +1792,9 @@ class Jogo:
         nomes={'alimento':'Alimento','producao':'Produção','ouro':'Ouro','ciencia':'Ciência','fe':'Fé'}
         partes=[f'{nomes.get(k,k)} {v:+d}' for k,v in base.items() if v]
         linhas=[f'Rendimento natural do tile: {" | ".join(partes) if partes else "nenhum"}']
+        camp=self.acampamento_em(x,y)
+        if camp:
+            linhas.append('Acampamento bárbaro: ativo. Pode abrigar Guerreiros agressivos; combate será implementado na etapa militar.')
         if self.mundo.tile_adjacente_rio(x,y):
             bacia=self.mundo.bacia_do_tile(x,y)
             linhas.append(f'Rio: este tile é adjacente a um rio da Bacia {bacia if bacia is not None else "não identificada"} e pode receber efeitos ribeirinhos.')
@@ -1427,7 +1873,7 @@ class Jogo:
             f'Ciência global: {estoque["ciencia"]} | +{taxa["ciencia"]}/turno',
             f'Fé global: {estoque["fe"]} | +{taxa["fe"]}/turno',
             f'Lealdade: {estoque["lealdade"]} total | +{taxa["lealdade"]}/turno',
-            f'Felicidade: {estoque["felicidade"]} total',
+            f'Felicidade média: {self.felicidade_media(j):.1f} (indicador local por cidade)',
         ]
         bloco_linhas(linhas1,xs[0],topo+28,larguras[0])
 
@@ -1441,7 +1887,8 @@ class Jogo:
                 linhas2.append(
                     f'{cidade.nome} [{cidade.id}] | Pop {cidade.populacao} | {etiqueta} | Bacia {self.mundo.cidade_na_bacia(cidade) or "-"} | '
                     f'Alimento +{r["alimento"]}, Produção +{r["producao"]}, Ouro +{r["ouro"]}, '
-                    f'Ciência +{r["ciencia"]}, Fé +{r["fe"]}, Lealdade +{r["lealdade"]}/turno'
+                    f'Ciência +{r["ciencia"]}, Fé +{r["fe"]}, Lealdade local {cidade.lealdade} (+{r["lealdade"]}/t), '
+                    f'Felicidade local {cidade.felicidade}' + (' | EM REVOLTA' if cidade.em_revolta else '')
                 )
         else:
             linhas2.append('Nenhuma cidade fundada.')
@@ -1471,6 +1918,41 @@ class Jogo:
 
         rodape='Barra principal: valor = estoque; (+X) = ganho/turno; Produção = capacidade atual/turno.'
         self.desenhar_texto_quebrado(rodape,self.fonte_pequena,(190,205,220),caixa.x+24,caixa.bottom-31,caixa.width-55,1,caixa.bottom-8)
+
+    def desenhar_modal_saudacao(self):
+        largura=min(680,self.largura_tela-40); altura=min(300,self.altura_tela-40)
+        caixa=pygame.Rect((self.largura_tela-largura)//2,(self.altura_tela-altura)//2,largura,altura)
+        pygame.draw.rect(self.tela,(50,54,61),caixa,border_radius=10)
+        pygame.draw.rect(self.tela,(170,145,85),caixa,2,border_radius=10)
+        dados=self.saudacao_atual or {'titulo':'Primeiro contato','texto':''}
+        self.desenhar_texto_quebrado(dados.get('titulo','Primeiro contato'),self.fonte_grande,(245,235,190),caixa.x+25,caixa.y+24,caixa.width-80,2,caixa.y+72)
+        self.desenhar_texto_quebrado(dados.get('texto',''),self.fonte,(225,225,225),caixa.x+25,caixa.y+86,caixa.width-50,4,caixa.bottom-70)
+        self.rect_fechar_saudacao=pygame.Rect(caixa.centerx-60,caixa.bottom-50,120,32); self.botao(self.rect_fechar_saudacao,'Continuar',True,(57,102,69))
+
+    def desenhar_modal_diplomacia(self):
+        largura=min(860,self.largura_tela-40); altura=min(620,self.altura_tela-40)
+        caixa=pygame.Rect((self.largura_tela-largura)//2,(self.altura_tela-altura)//2,largura,altura)
+        pygame.draw.rect(self.tela,(47,51,58),caixa,border_radius=10)
+        self.rect_fechar_diplomacia=pygame.Rect(caixa.right-45,caixa.y+15,30,30); self.botao(self.rect_fechar_diplomacia,'X')
+        self.tela.blit(self.fonte_grande.render('Diplomacia',True,(245,235,190)),(caixa.x+25,caixa.y+20))
+        self.desenhar_texto_quebrado('Somente povos encontrados no mapa aparecem aqui. Felicidade é local às cidades; Humor é a relação diplomática do outro povo com você.',
+                                    self.fonte_pequena,(190,205,220),caixa.x+25,caixa.y+58,caixa.width-60,2,caixa.y+105)
+        contatos=self.contatos_diplomacia_humano(); self.rects_conversar_diplomacia={}
+        y=caixa.y+112
+        if not contatos:
+            self.desenhar_texto_quebrado('Nenhuma outra civilização ou cidade-estado foi encontrada até agora.',self.fonte,(220,220,220),caixa.x+25,y,caixa.width-50,3,caixa.bottom-55)
+        for outro in contatos:
+            if y+70>caixa.bottom-55: break
+            tipo='Cidade-Estado' if outro.tipo=='cidade_estado' else 'Civilização'
+            lider=(f' | Líder: {outro.lider_nome}' if outro.tipo=='civilizacao' and outro.lider_nome else '')
+            humor_val=outro.humor_com(self.jogador_humano.uid)
+            humor=Jogador.texto_humor(humor_val)
+            linha=f'{outro.nome if outro.tipo=="cidade_estado" else outro.civilizacao} — {tipo}{lider}'
+            self.desenhar_texto_quebrado(linha,self.fonte_negrito,(235,235,235),caixa.x+25,y,caixa.width-250,1,y+42)
+            self.tela.blit(self.fonte_pequena.render(f'Humor: {humor} ({humor_val:+d})',True,(210,215,195)),(caixa.x+25,y+30))
+            rect=pygame.Rect(caixa.right-150,y+12,110,32); self.botao(rect,'Conversar')
+            self.rects_conversar_diplomacia[outro.uid]=rect
+            y+=66
 
     def desenhar_modal_generico(self,titulo,linhas):
         largura=min(600,self.largura_tela-40); altura=min(360,self.altura_tela-40)
@@ -1563,6 +2045,33 @@ class Jogo:
         # Movimento comum; para transportes com carga, terra é interpretada como desembarque.
         self.ordenar_movimento((x, y))
 
+    def desenhar_processamento_turno(self):
+        if not self.processando_turno:
+            return
+        # Painel compacto e translúcido: informa atividade sem esconder o mapa.
+        largura=min(620,max(360,self.largura_tela-80))
+        altura=112
+        x=(self.largura_tela-largura)//2
+        y=max(TOPO_MAPA+24,self.altura_tela//2-altura//2)
+        camada=pygame.Surface((largura,altura),pygame.SRCALPHA)
+        camada.fill((20,24,30,225))
+        self.tela.blit(camada,(x,y))
+        pygame.draw.rect(self.tela,(105,120,140),(x,y,largura,altura),1,border_radius=9)
+        titulo=self.fonte_negrito.render('Outras civilizações estão jogando agora... aguarde',True,(245,238,205))
+        self.tela.blit(titulo,titulo.get_rect(center=(x+largura//2,y+27)))
+        detalhe=self.status_processamento_turno or 'Processando turno...'
+        linhas=self.quebrar_texto(detalhe,self.fonte_pequena,largura-48)
+        yy=y+50
+        for linha in linhas[:2]:
+            surf=self.fonte_pequena.render(linha,True,(220,225,232))
+            self.tela.blit(surf,surf.get_rect(center=(x+largura//2,yy)))
+            yy+=18
+        # Indicador animado apenas visual; não cria atraso artificial.
+        fase=(pygame.time.get_ticks()//220)%4
+        pontos='.'*(fase+1)
+        anim=self.fonte_pequena.render('Processando'+pontos,True,(170,195,220))
+        self.tela.blit(anim,anim.get_rect(center=(x+largura//2,y+altura-18)))
+
     def tratar_evento_modal(self,e):
         if self.modal=='nome_cidade':
             if e.type==pygame.KEYDOWN:
@@ -1595,12 +2104,29 @@ class Jogo:
             fechar=(e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE) or (e.type==pygame.MOUSEBUTTONDOWN and e.button==1 and self.rect_fechar_status.collidepoint(e.pos))
             if fechar: self.modal=None
             return
-        if self.modal in ('sobre','politica','tecnologia','religiao','economia','diplomacia','militar'):
+        if self.modal=='saudacao':
+            fechar=(e.type==pygame.KEYDOWN and e.key in (pygame.K_RETURN,pygame.K_KP_ENTER,pygame.K_ESCAPE)) or (e.type==pygame.MOUSEBUTTONDOWN and e.button==1 and self.rect_fechar_saudacao.collidepoint(e.pos))
+            if fechar:
+                self.modal=None; self.saudacao_atual=None
+                self._abrir_proxima_saudacao()
+                if self.modal is None: self._abrir_proxima_notificacao()
+            return
+        if self.modal=='diplomacia':
+            if e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE: self.modal=None
+            elif e.type==pygame.MOUSEBUTTONDOWN and e.button==1:
+                if self.rect_fechar_diplomacia.collidepoint(e.pos): self.modal=None; return
+                for uid,rect in self.rects_conversar_diplomacia.items():
+                    if rect.collidepoint(e.pos):
+                        outro=self.jogador_por_uid(uid)
+                        self.mensagem=f'Conversa com {outro.nome if outro else uid}: opções diplomáticas serão adicionadas depois.'
+                        return
+            return
+        if self.modal in ('sobre','politica','tecnologia','religiao','economia','militar'):
             if e.type==pygame.KEYDOWN and e.key==pygame.K_ESCAPE: self.modal=None
             elif e.type==pygame.MOUSEBUTTONDOWN and e.button==1 and self.rect_fechar_generico.collidepoint(e.pos): self.modal=None
 
     def mover_camera_teclado(self):
-        if self.modal: return
+        if self.modal or self.processando_turno: return
         k=pygame.key.get_pressed()
         if k[pygame.K_LEFT] or k[pygame.K_a]: self.offset_x-=self.velocidade_scroll
         if k[pygame.K_RIGHT] or k[pygame.K_d]: self.offset_x+=self.velocidade_scroll
@@ -1614,6 +2140,10 @@ class Jogo:
             for e in pygame.event.get():
                 if e.type==pygame.QUIT: return 'sair'
                 if e.type==pygame.VIDEORESIZE: self.tela=pygame.display.set_mode(e.size,pygame.RESIZABLE); self._atualizar_layout(); continue
+                # Enquanto o Turn Manager trabalha, mantemos a janela responsiva
+                # (QUIT/RESIZE continuam funcionando), mas não aceitamos ordens.
+                if self.processando_turno:
+                    continue
                 if self.modal: self.tratar_evento_modal(e); continue
                 if e.type==pygame.MOUSEWHEEL: self.offset_y-=e.y*self.velocidade_scroll; self.limitar_camera()
                 elif e.type==pygame.KEYDOWN:
@@ -1669,19 +2199,26 @@ class Jogo:
                             self.ultimo_clique_esquerdo_tile=tile_clique
                     self.tratar_click_mapa(pos,e.button,duplo)
 
+            # Executa apenas um pequeno orçamento de IA por frame e volta a
+            # renderizar imediatamente.
+            self.processar_turno_incremental()
             self.mover_camera_teclado(); self.tela.fill((22,24,27)); self.desenhar_mapa(); self.desenhar_barras_rolagem(); self.desenhar_interface()
             msg=self.fonte_pequena.render(self.mensagem,True,(235,235,235)); fundo=pygame.Rect(8,self.altura_tela-38,min(msg.get_width()+16,self.largura_tela-30),24); pygame.draw.rect(self.tela,(35,38,43),fundo,border_radius=4); self.tela.blit(msg,(fundo.x+8,fundo.y+4))
+
+            if self.processando_turno:
+                self.desenhar_processamento_turno()
 
             if self.modal=='nome_cidade': self.desenhar_modal_nome()
             elif self.modal=='cidade': self.desenhar_modal_cidade()
             elif self.modal=='aviso': self.desenhar_modal_aviso()
             elif self.modal=='ajuda': self.desenhar_modal_ajuda()
             elif self.modal=='status_geral': self.desenhar_modal_status_geral()
-            elif self.modal=='sobre': self.desenhar_modal_generico('Sobre o TLC CIV 0.19',['Fundação de sistemas: IDs estáveis, save/load versionado, recursos globais, eventos, requisitos e modificadores com escopo.','Atributos-base de combate e consultas de bacias preparados para as próximas etapas.'])
+            elif self.modal=='saudacao': self.desenhar_modal_saudacao()
+            elif self.modal=='sobre': self.desenhar_modal_generico('Sobre o TLC CIV 0.21',['Fundação de sistemas: IDs estáveis, save/load versionado, recursos globais, eventos, requisitos e modificadores com escopo.','Atributos-base de combate e consultas de bacias preparados para as próximas etapas.'])
             elif self.modal=='politica': self.desenhar_modal_generico('Política',['Estrutura reservada para políticas e modificadores.'])
             elif self.modal=='tecnologia': self.desenhar_modal_generico('Tecnologia',[f'Era atual: {self.jogador_humano.era}',f'Tecnologias: {", ".join(sorted(self.jogador_humano.tecnologias))}',f'Ciência total: {self.totais_civilizacao(self.jogador_humano)["ciencia"]}'])
             elif self.modal=='religiao': self.desenhar_modal_generico('Religião',['Menu reservado para crenças, religiões e efeitos de Fé.'])
             elif self.modal=='economia': self.desenhar_modal_generico('Economia',['Menu reservado para Ouro, comércio, manutenção e rotas comerciais.'])
-            elif self.modal=='diplomacia': self.desenhar_modal_generico('Diplomacia',['Menu reservado para relações entre civilizações, acordos e guerras.'])
+            elif self.modal=='diplomacia': self.desenhar_modal_diplomacia()
             elif self.modal=='militar': self.desenhar_modal_generico('Militar',['Menu reservado para forças armadas, exércitos e informações de combate.'])
             pygame.display.flip(); relogio.tick(60)

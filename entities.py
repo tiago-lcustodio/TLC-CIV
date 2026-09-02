@@ -166,9 +166,19 @@ class Unidade:
         self.modificadores_temporarios=ativos
 
 
+class AcampamentoBarbaro:
+    def __init__(self, x, y, dono_id, entidade_id=None):
+        self.id = entidade_id
+        self.x = x
+        self.y = y
+        self.dono_id = dono_id
+        self.ativo = True
+
+
+
 class Cidade:
-    # Crescimento deliberadamente mais lento: limites dobrados em relação à v0.10.
-    LIMITES_POPULACAO = [20, 40, 100, 200, 400, 1000]
+    # Crescimento linear e bem mais lento: Pop 2=90, Pop 3=180, Pop 4=270...
+    LIMITES_POPULACAO = [90 * i for i in range(1, 51)]
 
     def __init__(self, nome, x, y, dono_id, entidade_id=None):
         self.id = entidade_id
@@ -191,6 +201,7 @@ class Cidade:
         self.ouro = 0
         self.lealdade = 0
         self.felicidade = 1
+        self.em_revolta = False
         self.capital = False
         self.melhorias = []
         self.raio_territorio = 1
@@ -223,6 +234,9 @@ class Cidade:
             if limite is None or self.alimento < limite:
                 break
             self.populacao += 1
+            # Pressão urbana: a partir da População 7, cada novo nível custa 1 Felicidade.
+            if self.populacao >= 7:
+                self.felicidade -= 1
             cresceu = True
 
         expansoes = 0

@@ -1,7 +1,7 @@
 import random
 import pygame
 from savegame import ARQUIVO_SAVE_PADRAO, existe_save
-from data import CORES_JOGADOR, CIVILIZACOES, DIFICULDADES
+from data import CORES_JOGADOR, CIVILIZACOES, DIFICULDADES, DENSIDADES_CIDADES_ESTADO, DENSIDADES_BARBAROS
 
 
 class MenuConfiguracao:
@@ -16,10 +16,14 @@ class MenuConfiguracao:
         self.indice_tamanho = 0
         self.cores = list(CORES_JOGADOR); self.indice_cor = 0
         self.civilizacoes = list(CIVILIZACOES); self.indice_civ = 0
-        self.dificuldades = list(DIFICULDADES); self.indice_dif = 0
+        self.dificuldades = list(DIFICULDADES); self.indice_dif = self.dificuldades.index('Padrão') if 'Padrão' in self.dificuldades else 0
         self.numero_cpus = 3
         self.densidades_rios = ['Poucos', 'Médio', 'Alto']
         self.indice_rios = 1
+        self.densidades_cidades_estado = list(DENSIDADES_CIDADES_ESTADO)
+        self.indice_cidades_estado = 1
+        self.densidades_barbaros = list(DENSIDADES_BARBAROS)
+        self.indice_barbaros = 1
         self.seed = random.SystemRandom().randrange(1, 2_147_483_647)
 
     def ajustar_percentual(self, terreno, delta):
@@ -58,7 +62,7 @@ class MenuConfiguracao:
         while True:
             largura, altura = self.tela.get_size()
             self.tela.fill((34,38,45))
-            titulo = self.fonte_titulo.render('TLC CIV 0.19', True, (240,240,240))
+            titulo = self.fonte_titulo.render('TLC CIV 0.21', True, (240,240,240))
             self.tela.blit(titulo, titulo.get_rect(center=(largura//2,42)))
             painel = pygame.Rect(max(20,largura//2-370),78,min(740,largura-40),max(560,altura-120))
             pygame.draw.rect(self.tela,(46,51,59),painel,border_radius=10)
@@ -72,20 +76,22 @@ class MenuConfiguracao:
                 ('Dificuldade',self.dificuldades[self.indice_dif],'dif'),
                 ('Tamanho do mapa',f'{self.tamanhos[self.indice_tamanho]} x {self.tamanhos[self.indice_tamanho]}','tam'),
                 ('Densidade de rios',self.densidades_rios[self.indice_rios],'rios'),
+                ('Cidades-estado',self.densidades_cidades_estado[self.indice_cidades_estado],'cidades_estado'),
+                ('Acampamentos bárbaros',self.densidades_barbaros[self.indice_barbaros],'barbaros'),
                 ('Seed do mapa',str(self.seed),'seed'),
             ]
             for rotulo,valor,chave in linhas:
                 self.tela.blit(self.fonte_pequena.render(f'{rotulo}: {valor}',True,(230,230,230)),(x,y+8))
-                menos=pygame.Rect(painel.right-135,y,42,34); mais=pygame.Rect(painel.right-82,y,42,34)
+                menos=pygame.Rect(painel.right-135,y,42,29); mais=pygame.Rect(painel.right-82,y,42,29)
                 self.botao(menos,'<'); self.botao(mais,'>'); botoes[chave]=(menos,mais)
                 if chave=='cor': pygame.draw.rect(self.tela,CORES_JOGADOR[valor],(x+245,y+8,46,20),border_radius=3)
-                y+=36
+                y+=31
             y+=6; self.tela.blit(self.fonte.render('Distribuição do mundo',True,(245,235,195)),(x,y)); y+=28
             ter_botoes={}
             for terreno in self.ordem_terrenos:
                 self.tela.blit(self.fonte_pequena.render(f'{terreno}: {self.percentuais[terreno]}%',True,(230,230,230)),(x,y+7))
-                menos=pygame.Rect(painel.right-135,y,42,32); mais=pygame.Rect(painel.right-82,y,42,32)
-                self.botao(menos,'-'); self.botao(mais,'+'); ter_botoes[terreno]=(menos,mais); y+=31
+                menos=pygame.Rect(painel.right-135,y,42,27); mais=pygame.Rect(painel.right-82,y,42,27)
+                self.botao(menos,'-'); self.botao(mais,'+'); ter_botoes[terreno]=(menos,mais); y+=27
             iniciar=pygame.Rect(painel.centerx-255,painel.bottom-58,245,42); self.botao(iniciar,'INICIAR JOGO',True,(49,112,68))
             carregar=pygame.Rect(painel.centerx+10,painel.bottom-58,245,42); self.botao(carregar,'CARREGAR JOGO',existe_save(),(58,82,112) if existe_save() else None)
             pygame.display.flip()
@@ -106,6 +112,8 @@ class MenuConfiguracao:
                         elif chave=='dif': self.indice_dif=(self.indice_dif+d)%len(self.dificuldades)
                         elif chave=='tam': self.indice_tamanho=(self.indice_tamanho+d)%len(self.tamanhos)
                         elif chave=='rios': self.indice_rios=(self.indice_rios+d)%len(self.densidades_rios)
+                        elif chave=='cidades_estado': self.indice_cidades_estado=(self.indice_cidades_estado+d)%len(self.densidades_cidades_estado)
+                        elif chave=='barbaros': self.indice_barbaros=(self.indice_barbaros+d)%len(self.densidades_barbaros)
                         elif chave=='seed': self.seed=max(1,min(2_147_483_646,self.seed+d))
                     if iniciar.collidepoint(pos):
                         tam=self.tamanhos[self.indice_tamanho]; nome_cor=self.cores[self.indice_cor]
@@ -113,7 +121,9 @@ class MenuConfiguracao:
                                 'civilizacao':self.civilizacoes[self.indice_civ],'nome_cor_jogador':nome_cor,
                                 'cor_jogador':CORES_JOGADOR[nome_cor],'numero_cpus':self.numero_cpus,
                                 'dificuldade':self.dificuldades[self.indice_dif],
-                                'densidade_rios':self.densidades_rios[self.indice_rios], 'seed':self.seed}
+                                'densidade_rios':self.densidades_rios[self.indice_rios],
+                                'densidade_cidades_estado':self.densidades_cidades_estado[self.indice_cidades_estado],
+                                'densidade_barbaros':self.densidades_barbaros[self.indice_barbaros], 'seed':self.seed}
                     if carregar.collidepoint(pos) and existe_save():
                         return {'carregar_save': ARQUIVO_SAVE_PADRAO}
             relogio.tick(60)

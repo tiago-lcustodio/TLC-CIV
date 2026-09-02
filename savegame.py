@@ -1,7 +1,7 @@
 import json
 import os
 
-SAVE_VERSION = 1
+SAVE_VERSION = 2
 ARQUIVO_SAVE_PADRAO = os.path.join(os.path.dirname(__file__), 'tlc_civ_save.json')
 
 
@@ -29,6 +29,9 @@ def serializar_jogo(jogo):
             'civilizacao': j.civilizacao,
             'humano': j.humano,
             'dificuldade': j.dificuldade,
+            'tipo': j.tipo, 'lider_nome': j.lider_nome, 'lider_genero': j.lider_genero,
+            'contatos_diplomaticos': sorted(j.contatos_diplomaticos),
+            'humor_relacoes': dict(j.humor_relacoes),
             'tecnologias': sorted(j.tecnologias),
             'politicas': sorted(j.politicas),
             'era': j.era,
@@ -54,7 +57,7 @@ def serializar_jogo(jogo):
             'turnos_producao_total': c.turnos_producao_total,
             'turnos_producao_restantes': c.turnos_producao_restantes,
             'populacao': c.populacao, 'alimento': c.alimento, 'producao': c.producao,
-            'lealdade': c.lealdade, 'felicidade': c.felicidade,
+            'lealdade': c.lealdade, 'felicidade': c.felicidade, 'em_revolta': c.em_revolta,
             'capital': c.capital,
             'melhorias': [list(m) for m in c.melhorias],
             'raio_territorio': c.raio_territorio,
@@ -75,6 +78,11 @@ def serializar_jogo(jogo):
             'modificadores_temporarios': u.modificadores_temporarios,
         })
 
+    acampamentos = [
+        {'id': a.id, 'x': a.x, 'y': a.y, 'dono_id': a.dono_id, 'ativo': a.ativo}
+        for a in jogo.acampamentos_barbaros
+    ]
+
     variantes = []
     for (x, y), valor in mundo.variantes.items():
         variantes.append({'x': x, 'y': y, 'valor': valor})
@@ -93,7 +101,7 @@ def serializar_jogo(jogo):
 
     return {
         'save_version': SAVE_VERSION,
-        'game_version': '0.19',
+        'game_version': '0.21',
         'configuracao': jogo.configuracao,
         'turno': jogo.turno,
         'rng_state': jogo.random.getstate(),
@@ -102,6 +110,7 @@ def serializar_jogo(jogo):
         'jogadores': jogadores,
         'cidades': cidades,
         'unidades': unidades,
+        'acampamentos_barbaros': acampamentos,
         'mundo': {
             'largura': mundo.largura, 'altura': mundo.altura,
             'percentuais': mundo.percentuais, 'seed': mundo.seed,
@@ -130,8 +139,8 @@ def ler_save(caminho=ARQUIVO_SAVE_PADRAO):
     with open(caminho, 'r', encoding='utf-8') as arq:
         dados = json.load(arq)
     versao = int(dados.get('save_version', 0))
-    if versao != SAVE_VERSION:
-        raise ValueError(f'Save incompatível: versão {versao}; esperado {SAVE_VERSION}.')
+    if versao not in (1, SAVE_VERSION):
+        raise ValueError(f'Save incompatível: versão {versao}; esperado 1 ou {SAVE_VERSION}.')
     return dados
 
 

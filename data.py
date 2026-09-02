@@ -8,26 +8,92 @@ CORES_JOGADOR = {
 }
 
 DIFICULDADES = {
+    'Fácil': {
+        'cpu_bonus_producao_pct': 0, 'cpu_bonus_ciencia_pct': 0,
+        'cpu_bonus_fe_pct': 0, 'cpu_bonus_alimento_pct': 0, 'cpu_bonus_ouro_pct': 0,
+        'multiplicador_barbaros': 0.75,
+    },
     'Padrão': {
-        'cpu_bonus_producao_pct': 0,
-        'cpu_bonus_ciencia_pct': 0,
-        'cpu_bonus_fe_pct': 0,
-        'cpu_bonus_alimento_pct': 0,
-        'cpu_bonus_ouro_pct': 0,
-    }
+        'cpu_bonus_producao_pct': 0, 'cpu_bonus_ciencia_pct': 0,
+        'cpu_bonus_fe_pct': 0, 'cpu_bonus_alimento_pct': 0, 'cpu_bonus_ouro_pct': 0,
+        'multiplicador_barbaros': 1.0,
+    },
+    'Difícil': {
+        'cpu_bonus_producao_pct': 0, 'cpu_bonus_ciencia_pct': 0,
+        'cpu_bonus_fe_pct': 0, 'cpu_bonus_alimento_pct': 0, 'cpu_bonus_ouro_pct': 0,
+        'multiplicador_barbaros': 1.35,
+    },
 }
 
 CIVILIZACOES = {
-    nome: {
-        'nome': nome,
-        'descricao': 'Civilização base preparada para bônus e conteúdo exclusivo.',
-        'unidade_especial': None,
-        'construcao_especial': None,
-        'modificadores': [],
-        'desbloqueios': [],
-    }
-    for nome in ['Romanos', 'Egípcios', 'Gregos', 'Persas', 'Fenícios', 'Celtas']
+    'Romanos': {
+        'nome': 'Romanos', 'descricao': 'Civilização base preparada para bônus e conteúdo exclusivo.',
+        'unidade_especial': None, 'construcao_especial': None, 'modificadores': [], 'desbloqueios': [],
+        'lideres_m': ['Marcus', 'Lucius', 'Gaius'], 'lideres_f': ['Livia', 'Julia', 'Claudia'],
+        'cidades': ['Roma', 'Ravena', 'Pompeia', 'Óstia', 'Verona', 'Capua', 'Aquileia', 'Mediolano'],
+        'saudacao': 'Roma reconhece sua presença. Que nossas fronteiras tragam ordem, prosperidade e respeito mútuo.',
+    },
+    'Egípcios': {
+        'nome': 'Egípcios', 'descricao': 'Civilização base preparada para bônus e conteúdo exclusivo.',
+        'unidade_especial': None, 'construcao_especial': None, 'modificadores': [], 'desbloqueios': [],
+        'lideres_m': ['Amenhotep', 'Ramsés', 'Tutemés'], 'lideres_f': ['Nefertari', 'Hatshepsut', 'Cleópatra'],
+        'cidades': ['Mênfis', 'Tebas', 'Alexandria', 'Heliópolis', 'Abidos', 'Elefantina', 'Saís', 'Edfu'],
+        'saudacao': 'As margens do Nilo saúdam seu povo. Que o tempo julgue se seremos parceiros ou rivais.',
+    },
+    'Gregos': {
+        'nome': 'Gregos', 'descricao': 'Civilização base preparada para bônus e conteúdo exclusivo.',
+        'unidade_especial': None, 'construcao_especial': None, 'modificadores': [], 'desbloqueios': [],
+        'lideres_m': ['Alexandros', 'Péricles', 'Leônidas'], 'lideres_f': ['Aspásia', 'Gorgo', 'Hipátia'],
+        'cidades': ['Atenas', 'Corinto', 'Argos', 'Tebas', 'Mileto', 'Delfos', 'Rodes', 'Siracusa'],
+        'saudacao': 'Os helenos lhe oferecem palavras antes de lanças. Que a razão conduza nosso primeiro encontro.',
+    },
+    'Persas': {
+        'nome': 'Persas', 'descricao': 'Civilização base preparada para bônus e conteúdo exclusivo.',
+        'unidade_especial': None, 'construcao_especial': None, 'modificadores': [], 'desbloqueios': [],
+        'lideres_m': ['Ciro', 'Dario', 'Xerxes'], 'lideres_f': ['Atossa', 'Parysatis', 'Amestris'],
+        'cidades': ['Persépolis', 'Susa', 'Pasárgada', 'Ecbátana', 'Sardes', 'Babilônia', 'Nínive', 'Bactra'],
+        'saudacao': 'O Grande Reino observa sua civilização com interesse. Que nossas estradas conduzam a bons acordos.',
+    },
+    'Fenícios': {
+        'nome': 'Fenícios', 'descricao': 'Civilização base preparada para bônus e conteúdo exclusivo.',
+        'unidade_especial': None, 'construcao_especial': None, 'modificadores': [], 'desbloqueios': [],
+        'lideres_m': ['Hiram', 'Mattã', 'Baal-Eser'], 'lideres_f': ['Elissa', 'Astarté', 'Batnoam'],
+        'cidades': ['Tiro', 'Sídon', 'Biblos', 'Arados', 'Berito', 'Cartago', 'Útica', 'Gades'],
+        'saudacao': 'Nossos mercadores já ouviram falar de seu povo. Talvez o mar leve riquezas entre nós.',
+    },
+    'Celtas': {
+        'nome': 'Celtas', 'descricao': 'Civilização base preparada para bônus e conteúdo exclusivo.',
+        'unidade_especial': None, 'construcao_especial': None, 'modificadores': [], 'desbloqueios': [],
+        'lideres_m': ['Brennos', 'Vercingetórix', 'Catuvolco'], 'lideres_f': ['Boudica', 'Cartimandua', 'Chiomara'],
+        'cidades': ['Bibracte', 'Avaricum', 'Gergóvia', 'Camuloduno', 'Lugduno', 'Lutetia', 'Segóvia', 'Nemetocena'],
+        'saudacao': 'Seu povo entrou em nossas histórias. Mostre honra, e talvez nossos clãs caminhem em paz.',
+    },
 }
+
+LIDERES_GENERICOS_M = ['Adrian', 'Dorian', 'Leon']
+LIDERES_GENERICOS_F = ['Helena', 'Mira', 'Selene']
+
+CIDADES_ESTADO = [
+    'Esparta', 'Tiro', 'Samarcanda', 'Veneza', 'Genebra', 'Zanzibar',
+    'Mohenjo-Daro', 'Ur', 'Jerusalém', 'Ragusa', 'Kabul', 'La Venta',
+    'Nan Madol', 'Valeta', 'Fez', 'Cartum', 'Singapura', 'Hong Kong',
+]
+
+SAUDACOES_CIDADES_ESTADO = [
+    'Saudações de {nome}. Somos uma cidade livre e observaremos com atenção suas escolhas.',
+    '{nome} reconhece seus emissários. Comércio e amizade podem ser úteis a ambos.',
+    'Os portões de {nome} estão abertos ao diálogo. Nossa independência, porém, é preciosa.',
+]
+
+CORES_CIDADE_ESTADO = [
+    (155, 145, 75), (120, 145, 165), (150, 105, 145), (105, 155, 135),
+    (165, 120, 85), (125, 125, 155),
+]
+COR_BARBAROS = (95, 55, 50)
+
+DENSIDADES_CIDADES_ESTADO = {'Poucas': 1.5, 'Média': 3.0, 'Muitas': 5.0}
+DENSIDADES_BARBAROS = {'Poucos': 1.0, 'Médio': 2.0, 'Muitos': 4.0}
+
 
 ERAS = ['Antiga', 'Clássica', 'Medieval', 'Renascimento', 'Industrial', 'Moderna', 'Atômica', 'Informação']
 
